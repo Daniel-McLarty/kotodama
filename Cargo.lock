@@ -1879,6 +1879,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "cpal",
  "dirs",
  "iced",
  "rfd",
