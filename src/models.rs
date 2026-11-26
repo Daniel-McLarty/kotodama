@@ -46,7 +46,6 @@ impl NavTab {
 }
 
 /// Source location for reading graduated Anki cards and media files.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeckSource {
     /// Local Anki SQLite collection copied to a temporary file before reading.
@@ -78,7 +77,6 @@ pub struct FieldMapping {
     pub sentence_audio_field: Option<String>,
 }
 
-#[allow(dead_code)]
 impl FieldMapping {
     /// Validates that required note field mappings are non-empty.
     pub fn validate(&self) -> Result<()> {
@@ -96,7 +94,6 @@ impl FieldMapping {
 }
 
 /// Persisted configuration for a connected Anki deck.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeckConfig {
     /// Selected Anki deck name.
@@ -111,7 +108,6 @@ pub struct DeckConfig {
     pub flagged_audio_count: usize,
 }
 
-#[allow(dead_code)]
 impl DeckConfig {
     /// Validates deck selection, source configuration, and field mappings.
     pub fn validate(&self) -> Result<()> {
@@ -141,8 +137,151 @@ impl DeckConfig {
     }
 }
 
-/// Audio quality problems detected during pre-flight deck validation.
+/// Summary metadata for a single deck discovered in an Anki collection.
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnkiDeckSummary {
+    /// Numeric Anki deck identifier.
+    pub deck_id: i64,
+    /// Display name of the deck using `::` as the hierarchy separator.
+    pub name: String,
+    /// Number of unique graduated (`queue = 2`) notes in this deck and its subdecks.
+    pub learned_card_count: usize,
+    /// Total number of cards in this deck and its subdecks.
+    pub total_card_count: usize,
+}
+
+/// Note type definition and ordered field list from an Anki collection.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnkiNoteType {
+    /// Numeric Anki note type (model) identifier.
+    pub id: i64,
+    /// Human-readable name of the note type.
+    pub name: String,
+    /// Ordered list of field names belonging to this note type.
+    pub field_names: Vec<String>,
+}
+
+/// Raw graduated Anki note fields prior to applying a user [`FieldMapping`].
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnkiRawNote {
+    /// Representative Anki card ID (`cards.id`).
+    pub card_id: i64,
+    /// Anki note ID (`notes.id`).
+    pub note_id: i64,
+    /// Name of the deck containing this card.
+    pub deck_name: String,
+    /// Associated note type (model) ID.
+    pub note_type_id: i64,
+    /// Anki card queue state (`2` indicates a graduated review card).
+    pub anki_queue: i32,
+    /// Raw field values keyed by note field name.
+    pub fields: BTreeMap<String, String>,
+}
+
+/// Discovered decks and note types loaded from an Anki collection source.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnkiCollectionSummary {
+    /// Source connection details used to inspect the collection.
+    pub source: DeckSource,
+    /// Discovered decks in the collection.
+    pub decks: Vec<AnkiDeckSummary>,
+    /// Discovered note types and their field names.
+    pub note_types: Vec<AnkiNoteType>,
+}
+
+/// Aggregated audio pre-flight quality report for a deck's reference clips.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeckAudioReport {
+    /// Total graduated cards inspected.
+    pub total_cards: usize,
+    /// Total audio clip references checked across all cards.
+    pub total_clips_checked: usize,
+    /// Number of cards with at least one flagged audio quality issue.
+    pub flagged_cards: usize,
+    /// Number of missing or unreadable clip references.
+    pub missing_files: usize,
+    /// Number of clips shorter than the minimum 200 ms threshold.
+    pub too_short_clips: usize,
+    /// Number of clips reaching digital clipping levels.
+    pub clipped_clips: usize,
+    /// Number of clips that failed audio decoding.
+    pub decode_failures: usize,
+}
+
+impl DeckAudioReport {
+    /// Returns `true` when any audio quality warning or error was detected.
+    pub const fn has_issues(&self) -> bool {
+        self.flagged_cards > 0
+    }
+
+    /// Formats a concise one-line summary of the deck audio pre-flight check.
+    pub fn summary_line(&self) -> String {
+        if self.total_cards == 0 {
+            return "No learned cards checked yet.".to_string();
+        }
+        if !self.has_issues() {
+            return format!(
+                "All {} clips across {} learned cards passed audio checks.",
+                self.total_clips_checked, self.total_cards
+            );
+        }
+
+        format!(
+            "{} of {} cards flagged ({} missing, {} < 200ms, {} clipped, {} decode errors).",
+            self.flagged_cards,
+            self.total_cards,
+            self.missing_files,
+            self.too_short_clips,
+            self.clipped_clips,
+            self.decode_failures
+        )
+    }
+}
+
+/// Persisted deck workspace containing the active deck and saved per-deck field mappings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeckWorkspaceConfig {
+    /// Most recently configured active Anki deck.
+    pub active_deck: Option<DeckConfig>,
+    /// Per-deck saved field mappings keyed by deck name.
+    pub saved_mappings: BTreeMap<String, FieldMapping>,
+}
+
+/// Decoded interleaved PCM audio buffer normalized to `[-1.0, 1.0]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedAudio {
+    /// Interleaved normalized `f32` audio samples.
+    pub samples: Vec<f32>,
+    /// Sampling rate in Hertz.
+    pub sample_rate: u32,
+    /// Number of audio channels.
+    pub channels: u16,
+}
+
+impl DecodedAudio {
+    /// Returns the number of multi-channel sample frames in the buffer.
+    pub fn frame_count(&self) -> usize {
+        if self.channels == 0 {
+            return 0;
+        }
+        self.samples.len() / usize::from(self.channels)
+    }
+
+    /// Returns the audio duration in milliseconds.
+    pub fn duration_ms(&self) -> u64 {
+        if self.sample_rate == 0 || self.channels == 0 {
+            return 0;
+        }
+        let frames = self.frame_count() as u64;
+        frames.saturating_mul(1000) / u64::from(self.sample_rate)
+    }
+}
+
+/// Audio quality problems detected during pre-flight deck validation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AudioQualityIssue {
     /// Referenced media file could not be found in `collection.media`.
@@ -164,8 +303,23 @@ pub enum AudioQualityIssue {
     },
 }
 
+impl AudioQualityIssue {
+    /// Returns a concise, user-facing description of the audio quality issue.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::MissingFile => "Missing audio file".to_string(),
+            Self::TooShort { duration_ms } => {
+                format!("Too short ({duration_ms} ms < 200 ms)")
+            }
+            Self::ClippedAudio { peak_ratio } => {
+                format!("Clipped audio (peak {peak_ratio:.2})")
+            }
+            Self::DecodeFailed { reason } => format!("Decode failed: {reason}"),
+        }
+    }
+}
+
 /// Graduated Anki card imported into Kotodama for pronunciation practice.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnkiCard {
     /// Anki card ID (`cards.id`).
@@ -192,7 +346,6 @@ pub struct AnkiCard {
     pub last_pitch_error_percent: Option<f32>,
 }
 
-#[allow(dead_code)]
 impl AnkiCard {
     /// Anki queue value representing graduated cards in the review state.
     pub const LEARNED_QUEUE: i32 = 2;
@@ -1158,6 +1311,91 @@ mod tests {
         }"#;
         let migrated: AppSettings = serde_json::from_str(legacy_json)?;
         assert_eq!(migrated.theme_preference, ThemePreference::System);
+        Ok(())
+    }
+
+    #[test]
+    fn audio_quality_issue_summary_and_deck_report_format_concisely() {
+        assert_eq!(AudioQualityIssue::MissingFile.summary(), "Missing audio file");
+        assert_eq!(
+            AudioQualityIssue::TooShort { duration_ms: 120 }.summary(),
+            "Too short (120 ms < 200 ms)"
+        );
+        assert_eq!(
+            AudioQualityIssue::ClippedAudio { peak_ratio: 1.0 }.summary(),
+            "Clipped audio (peak 1.00)"
+        );
+        assert_eq!(
+            AudioQualityIssue::DecodeFailed {
+                reason: "bad header".to_string()
+            }
+            .summary(),
+            "Decode failed: bad header"
+        );
+
+        let clean = DeckAudioReport {
+            total_cards: 12,
+            total_clips_checked: 20,
+            ..DeckAudioReport::default()
+        };
+        assert!(!clean.has_issues());
+        assert_eq!(
+            clean.summary_line(),
+            "All 20 clips across 12 learned cards passed audio checks."
+        );
+
+        let flagged = DeckAudioReport {
+            total_cards: 12,
+            total_clips_checked: 20,
+            flagged_cards: 3,
+            missing_files: 1,
+            too_short_clips: 1,
+            clipped_clips: 1,
+            decode_failures: 0,
+        };
+        assert!(flagged.has_issues());
+        assert_eq!(
+            flagged.summary_line(),
+            "3 of 12 cards flagged (1 missing, 1 < 200ms, 1 clipped, 0 decode errors)."
+        );
+    }
+
+    #[test]
+    fn decoded_audio_duration_and_workspace_config_round_trip() -> Result<()> {
+        let audio = DecodedAudio {
+            samples: vec![0.0; 44_100],
+            sample_rate: 44_100,
+            channels: 2,
+        };
+        assert_eq!(audio.frame_count(), 22_050);
+        assert_eq!(audio.duration_ms(), 500);
+
+        let zero_rate = DecodedAudio {
+            samples: vec![0.0; 10],
+            sample_rate: 0,
+            channels: 1,
+        };
+        assert_eq!(zero_rate.duration_ms(), 0);
+
+        let config = DeckConfig {
+            deck_name: "Core 2k".to_string(),
+            source: DeckSource::AnkiConnect {
+                endpoint_url: "http://127.0.0.1:8765".to_string(),
+            },
+            field_mapping: valid_mapping(),
+            last_synced_at: Some(sample_time()),
+            flagged_audio_count: 1,
+        };
+        let mut saved_mappings = BTreeMap::new();
+        saved_mappings.insert("Core 2k".to_string(), valid_mapping());
+        let workspace = DeckWorkspaceConfig {
+            active_deck: Some(config),
+            saved_mappings,
+        };
+
+        let encoded = serde_json::to_string(&workspace)?;
+        let decoded: DeckWorkspaceConfig = serde_json::from_str(&encoded)?;
+        assert_eq!(workspace, decoded);
         Ok(())
     }
 }
