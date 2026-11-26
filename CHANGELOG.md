@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-26
+
+### Added
+- Cross-platform `cpal` microphone capture and live monitoring (`src/audio/capture.rs`) with input device enumeration (`list_input_devices`), non-blocking `MicMonitorHandle`, `RecordingSession`, and safe stream error propagation.
+- Frame-RMS Voice Activity Detection (VAD) silence trimming (`trim_silence_vad`) and automatic trailing-silence stop tracking (`VadAutoStopTracker`) with configurable sensitivity, trailing silence duration, and max-duration caps.
+- Pure-Rust WSOLA time-stretching (`time_stretch_preserve_pitch` and `play_decoded_audio` / `play_audio_file_at_speed` in `src/audio/playback.rs`) for pitch-preserving `0.75x` slow-motion reference and test-take playback.
+- Pure-Rust pitch analysis engine (`src/audio/dsp.rs`) implementing YIN `F0` extraction (`extract_f0_contour`), 3-point voiced median smoothing, semitone median normalization (`normalize_to_semitones`), path-normalized DTW alignment (`dtw_pitch_distance`), pitch error % scoring, and synthetic sine-wave / noise / cross-register / tempo / WSOLA verification tests.
+- Interactive **Microphone & VAD Calibration** card in Settings (`src/ui/mod.rs`) featuring an input device selector, device refresh, Iced `Canvas` live level meter (`MicMeterProgram`) with coral VAD threshold indicator, mic test monitor, test recording & playback controls, VAD sensitivity slider (`slider_style` in `src/ui/theme.rs`), and trailing silence presets (`600ms`, `1000ms`, `1500ms`).
+- Centralized Phase 3 domain types in `src/models.rs` (`InputDeviceInfo`, `VadConfig`, `MicLevelSnapshot`, `PitchExtractionConfig`, `CaptureStopReason`, `RecordedTake`, and `DecodedAudio::to_mono`) plus backwards-compatible `AppSettings` fields (`preferred_input_device`, `vad_rms_threshold`).
+
+### Changed
+- Wired Setup **Play Test Audio** to honor the active `0.75x` / `1.0x` `PlaybackSpeed` setting.
+- Automatically stops active microphone monitoring or test recording when navigating away from Settings.
+
 ## [0.2.1] - 2026-11-26
 
 ### Added

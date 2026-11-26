@@ -21,16 +21,16 @@
   - Tracks daily streaks, configurable daily goals (cards or minutes), accuracy over time, per-card pitch error %, and top-5 confusion matrices per kana (e.g., `つ: 82% correct — 5% す, 4% ず, 3% すう, 6% unknown`).
   - Exports session history, confusion matrices, and pitch error logs to **CSV** and **JSON**.
 
-## Current Status (`v0.2.1`)
+## Current Status (`v0.3.0`)
 
-Phase 2 (Anki Ingestion & Field Mapper) is complete:
-- Safe temporary-copy `collection.anki2` reader (classic & modern Anki SQLite schemas, WAL-aware, zero DB locking) and live `AnkiConnect` (`http://127.0.0.1:8765`) ingestion filtering exclusively for graduated cards (`queue = 2`).
-- Interactive Setup view with native file/folder pickers, deck selector, 5-field mapping dropdowns (`Target Word / Expression`, `Kana Reading`, optional `Example Sentence`, `Word Audio`, optional `Sentence Audio`), live sample card preview, and **Play Test Audio** button powered by a persistent audio playback sink.
-- Garbage-In, Garbage-Out (GIGO) pre-flight validator flagging missing clips, clips shorter than `200ms`, clipped audio, and decode errors, plus local persistence of deck configs, per-deck field mappings, and excluded card IDs (`deck_config.json`).
-- Per-deck card exclusions (**Exclude Card**, **Auto-Exclude Invalid Audio Cards**, and **Restore Excluded** in Setup and Settings) to skip problematic cards without altering your Anki deck.
-- Adaptive cross-platform Light & Dark mode (`System`, `Light`, `Dark`) and dismissible toast overlay for recoverable errors.
+Phase 3 (Audio Pipeline & DSP Engine) is complete:
+- Cross-platform `cpal` microphone capture (`src/audio/capture.rs`) with input device selection, live level monitoring, frame-RMS Voice Activity Detection (VAD) silence trimming, and automatic trailing-silence stop detection.
+- Pitch-preserving `0.75x` / `1.0x` WSOLA playback (`src/audio/playback.rs`) wired to both reference preview audio and recorded test takes.
+- Pure-Rust DSP pitch engine (`src/audio/dsp.rs`) performing YIN fundamental frequency (`F0`) extraction, speaker-median semitone normalization, and Dynamic Time Warping (DTW) pitch error scoring.
+- **Microphone & VAD Calibration** bar in Settings (`Canvas` live dBFS meter with coral VAD threshold marker, input device selector, test recording/playback, VAD sensitivity slider, and trailing silence presets).
+- Safe temporary-copy `collection.anki2` & live `AnkiConnect` ingestion (`queue = 2`), interactive 5-field Setup mapper, GIGO audio quality pre-flight checks, per-deck card exclusions, and adaptive Light/Dark mode.
 
-Upcoming phases add microphone capture & $F_0$/DTW DSP (`v0.3.0`), SQLite/FSRS scheduling & exporters (`v0.4.0`), interactive practice canvases (`v0.5.0`), and full analytics (`v0.6.0`).
+Upcoming phases add SQLite/FSRS scheduling & exporters (`v0.4.0`), interactive practice canvases (`v0.5.0`), and full analytics (`v0.6.0`).
 
 ## Connecting an Anki Deck & Mapping Fields
 

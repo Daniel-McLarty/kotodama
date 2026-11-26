@@ -13,7 +13,7 @@ Execute one phase at a time. Commit and push logically after each meaningful uni
   - Implement audio pre-flight validator in `src/anki/validator.rs` (missing files, `< 200ms`, clipping).
   - Build the Setup UI with deck picker, field-mapping dropdowns, GIGO warning banner, live card preview, and graceful file-picker error popups.
 
-- [ ] **Phase 3: Audio Pipeline & DSP Engine (`v0.3.0`)**
+- [x] **Phase 3: Audio Pipeline & DSP Engine (`v0.3.0`)**
   - Implement `cpal` mic capture, VAD silence trimming, auto-stop silence detection, and `symphonia`/`rodio` playback (including `0.75x` / `1.0x` speed toggle).
   - Implement $F_0$ pitch extraction, semitone median normalization, and DTW pitch error % in `src/audio/dsp.rs` with synthetic sine-wave unit tests.
   - Add a Mic Calibration bar in Settings.
