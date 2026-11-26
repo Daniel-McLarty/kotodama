@@ -717,9 +717,84 @@ impl PlaybackSpeed {
     }
 }
 
+/// User-selected theme preference controlling Light/Dark appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ThemePreference {
+    /// Follow the operating system's current light or dark appearance.
+    #[default]
+    System,
+    /// Force Kotodama's warm cream Light palette.
+    Light,
+    /// Force Kotodama's warm charcoal/espresso Dark palette.
+    Dark,
+}
+
+impl ThemePreference {
+    /// Ordered list of all selectable theme preferences.
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    /// Short display label for UI controls.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    /// Cycles to the next preference in `System -> Light -> Dark -> System` order.
+    pub const fn cycle_next(self) -> Self {
+        match self {
+            Self::System => Self::Light,
+            Self::Light => Self::Dark,
+            Self::Dark => Self::System,
+        }
+    }
+
+    /// Resolves this preference into a concrete [`ResolvedTheme`] given the OS dark-mode flag.
+    pub const fn resolve(self, system_is_dark: Option<bool>) -> ResolvedTheme {
+        match self {
+            Self::System => match system_is_dark {
+                Some(true) => ResolvedTheme::Dark,
+                Some(false) | None => ResolvedTheme::Light,
+            },
+            Self::Light => ResolvedTheme::Light,
+            Self::Dark => ResolvedTheme::Dark,
+        }
+    }
+}
+
+/// Concrete Light or Dark color scheme currently rendered by the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResolvedTheme {
+    /// Warm cream and soft slate light appearance.
+    Light,
+    /// Warm charcoal and espresso dark appearance.
+    Dark,
+}
+
+impl ResolvedTheme {
+    /// Human-readable name of the resolved color scheme.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    /// Returns `true` when the active appearance is Dark mode.
+    #[allow(dead_code)]
+    pub const fn is_dark(self) -> bool {
+        matches!(self, Self::Dark)
+    }
+}
+
 /// User-configurable ergonomics, audio, and scheduling settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
+    /// Color-scheme preference (`System`, `Light`, or `Dark`).
+    #[serde(default)]
+    pub theme_preference: ThemePreference,
     /// Automatically stop microphone capture after trailing VAD silence.
     pub auto_stop_vad: bool,
     /// Duration of trailing silence in milliseconds before auto-stopping recording.
@@ -737,6 +812,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            theme_preference: ThemePreference::default(),
             auto_stop_vad: true,
             vad_silence_ms: 1000,
             playback_speed: PlaybackSpeed::Normal,
@@ -1041,8 +1117,25 @@ mod tests {
     }
 
     #[test]
+    fn theme_preference_resolves_and_cycles_deterministically() {
+        assert_eq!(ThemePreference::default(), ThemePreference::System);
+        assert_eq!(ThemePreference::System.resolve(Some(true)), ResolvedTheme::Dark);
+        assert_eq!(ThemePreference::System.resolve(Some(false)), ResolvedTheme::Light);
+        assert_eq!(ThemePreference::System.resolve(None), ResolvedTheme::Light);
+        assert_eq!(ThemePreference::Light.resolve(Some(true)), ResolvedTheme::Light);
+        assert_eq!(ThemePreference::Dark.resolve(Some(false)), ResolvedTheme::Dark);
+
+        assert_eq!(ThemePreference::System.cycle_next(), ThemePreference::Light);
+        assert_eq!(ThemePreference::Light.cycle_next(), ThemePreference::Dark);
+        assert_eq!(ThemePreference::Dark.cycle_next(), ThemePreference::System);
+        assert!(ResolvedTheme::Dark.is_dark());
+        assert!(!ResolvedTheme::Light.is_dark());
+    }
+
+    #[test]
     fn serde_round_trip_preserves_settings_and_deck_config() -> Result<()> {
         let settings = AppSettings {
+            theme_preference: ThemePreference::Dark,
             auto_stop_vad: false,
             vad_silence_ms: 1200,
             playback_speed: PlaybackSpeed::Slow,
@@ -1054,6 +1147,17 @@ mod tests {
         let decoded: AppSettings = serde_json::from_str(&encoded)?;
         assert_eq!(settings, decoded);
         assert!((decoded.playback_speed.multiplier() - 0.75).abs() < 0.001);
+
+        let legacy_json = r#"{
+            "auto_stop_vad": true,
+            "vad_silence_ms": 1000,
+            "playback_speed": "Normal",
+            "blind_mode": false,
+            "daily_goal": { "Cards": 10 },
+            "score_thresholds": { "hard_min": 50.0, "good_min": 75.0, "easy_min": 90.0 }
+        }"#;
+        let migrated: AppSettings = serde_json::from_str(legacy_json)?;
+        assert_eq!(migrated.theme_preference, ThemePreference::System);
         Ok(())
     }
 }

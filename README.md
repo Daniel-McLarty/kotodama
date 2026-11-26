@@ -21,10 +21,11 @@
   - Tracks daily streaks, configurable daily goals (cards or minutes), accuracy over time, per-card pitch error %, and top-5 confusion matrices per kana (e.g., `つ: 82% correct — 5% す, 4% ず, 3% すう, 6% unknown`).
   - Exports session history, confusion matrices, and pitch error logs to **CSV** and **JSON**.
 
-## Current Status (`v0.1.0`)
+## Current Status (`v0.1.1`)
 
-Phase 1 (Foundation & Centralized Models) is complete:
+Phase 1 (Foundation & Centralized Models) is complete, including adaptive theming:
 - Warm, playful Iced `0.14` desktop shell with Setup, Practice, Dashboard, and Settings navigation.
+- Adaptive cross-platform Light & Dark mode (warm cream Light palette and warm charcoal/espresso Dark palette), defaulting to the OS color-scheme preference (`System`) with live OS change tracking, a quick top-bar toggle, and a persisted `System` / `Light` / `Dark` selector in Settings.
 - Centralized domain models with validation, streak/goal tracking, and per-kana mistake formatting.
 - Dismissible toast overlay for recoverable errors and warnings.
 

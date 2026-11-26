@@ -4,11 +4,14 @@ use chrono::Utc;
 use iced::widget::{button, column, container, progress_bar, row, text};
 use iced::{Alignment, Element, Length};
 
-use crate::models::{DailyStreak, KanaStats, MoraAttempt};
-use crate::ui::{Message, theme};
+use crate::models::{DailyStreak, KanaStats, MoraAttempt, ResolvedTheme};
+use crate::ui::theme::{self, ThemeTokens};
+use crate::ui::Message;
 
 /// Renders the analytics dashboard with daily streaks, kana confusion preview, and export controls.
-pub fn view<'a>(streak: &'a DailyStreak) -> Element<'a, Message> {
+pub fn view<'a>(streak: &'a DailyStreak, resolved_theme: ResolvedTheme) -> Element<'a, Message> {
+    let colors = theme::tokens(resolved_theme);
+
     let goal_status = if streak.is_daily_goal_met() {
         "Goal complete"
     } else {
@@ -20,16 +23,19 @@ pub fn view<'a>(streak: &'a DailyStreak) -> Element<'a, Message> {
             "Current Streak",
             format!("{} days", streak.current_streak_days),
             format!("Best: {} days", streak.longest_streak_days),
+            colors,
         ),
         metric_card(
             "Today's Progress",
             format!("{} cards", streak.cards_practiced_today),
             format!("{} · {}", streak.daily_goal.label(), goal_status),
+            colors,
         ),
         metric_card(
             "Total Sessions",
             streak.total_sessions.to_string(),
             format!("{} min practiced today", streak.minutes_practiced_today),
+            colors,
         ),
     ]
     .spacing(14);
@@ -37,10 +43,15 @@ pub fn view<'a>(streak: &'a DailyStreak) -> Element<'a, Message> {
     let goal_card = container(
         column![
             row![
-                text("Daily Goal Completion").size(16).color(theme::WARM_SLATE),
-                text(format!("{}%", (streak.goal_progress_ratio() * 100.0).round() as u32))
-                    .size(14)
-                    .color(theme::SAGE),
+                text("Daily Goal Completion")
+                    .size(16)
+                    .color(colors.text_primary),
+                text(format!(
+                    "{}%",
+                    (streak.goal_progress_ratio() * 100.0).round() as u32
+                ))
+                .size(14)
+                .color(colors.sage),
             ]
             .spacing(12)
             .align_y(Alignment::Center),
@@ -58,11 +69,11 @@ pub fn view<'a>(streak: &'a DailyStreak) -> Element<'a, Message> {
         column![
             text("Per-Kana Clarity Breakdown (Preview)")
                 .size(18)
-                .color(theme::WARM_SLATE),
+                .color(colors.text_primary),
             text("Once practice sessions are recorded, each kana lists exact accuracy and its top 5 substitutions.")
                 .size(14)
-                .color(theme::MUTED_SLATE),
-            container(text(sample_breakdown).size(14).color(theme::WARM_SLATE))
+                .color(colors.text_muted),
+            container(text(sample_breakdown).size(14).color(colors.text_primary))
                 .width(Length::Fill)
                 .padding(14)
                 .style(theme::muted_card_style),
@@ -77,10 +88,10 @@ pub fn view<'a>(streak: &'a DailyStreak) -> Element<'a, Message> {
         column![
             text("Export Session History & Confusion Matrix")
                 .size(17)
-                .color(theme::WARM_SLATE),
+                .color(colors.text_primary),
             text("Export full pronunciation history, per-kana mistake counts, and pitch accent error logs.")
                 .size(14)
-                .color(theme::MUTED_SLATE),
+                .color(colors.text_muted),
             row![
                 button(text("Export CSV").size(14))
                     .padding([10, 16])
@@ -105,12 +116,17 @@ pub fn view<'a>(streak: &'a DailyStreak) -> Element<'a, Message> {
         .into()
 }
 
-fn metric_card<'a>(title: &'a str, value: String, caption: String) -> Element<'a, Message> {
+fn metric_card<'a>(
+    title: &'a str,
+    value: String,
+    caption: String,
+    colors: &'static ThemeTokens,
+) -> Element<'a, Message> {
     container(
         column![
-            text(title).size(13).color(theme::MUTED_SLATE),
-            text(value).size(24).color(theme::WARM_SLATE),
-            text(caption).size(12).color(theme::SAGE),
+            text(title).size(13).color(colors.text_muted),
+            text(value).size(24).color(colors.text_primary),
+            text(caption).size(12).color(colors.sage),
         ]
         .spacing(6),
     )

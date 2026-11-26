@@ -3,8 +3,9 @@
 ## 1. Overview & Vibe
 **Kotodama** is a local-first, gamified Japanese pronunciation trainer built in Rust with **Iced**. It uses the user's existing Anki decks (specifically cards in the `Learned` / `Review` state) as ground-truth audio and text, then schedules pronunciation drills using an independent **FSRS** database.
 
-- **Aesthetic:** Warm, playful, and approachable (soft cream/warm-slate backgrounds, coral/amber/sage accents, rounded cards, encouraging micro-copy, clear visual feedback—never clinical or intimidating).
+- **Aesthetic:** Warm, playful, and approachable with **adaptive cross-platform Light & Dark mode** (soft cream/warm-slate Light palette and warm charcoal/espresso Dark palette—avoiding harsh pure black/white—paired with coral/amber/sage accents, rounded cards, encouraging micro-copy, and clear visual feedback). Defaults to the OS color-scheme preference (`System`) with live OS change tracking, a quick top-bar toggle, and a `System` / `Light` / `Dark` selector persisted in local settings.
 - **Garbage-In, Garbage-Out Warning:** Prominently warn users during deck setup that pronunciation grading is only as good as their deck's native audio. Flag suspicious audio (missing files, `< 200ms` clips, clipped audio).
+- **Adaptive Light & Dark Mode:** Default to following the operating system's color-scheme preference across Linux (XDG Desktop Portal / GTK), Windows, and macOS, with a manual three-way override (`System`, `Light`, `Dark`) in Settings and a quick toggle in the navigation header. Maintain the warm, playful palette in both variants (soft cream/coral/sage in Light mode; warm charcoal/espresso/amber/sage in Dark mode—never harsh pure `#000000` or `#FFFFFF`).
 
 ## 2. Core Features
 
