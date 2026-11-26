@@ -10,25 +10,35 @@ pub mod setup;
 pub mod theme;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Error;
 use chrono::Utc;
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, row, scrollable, space, stack, text, toggler};
-use iced::{Alignment, Element, Length, Subscription, Task, Theme};
+use iced::widget::{
+    button, canvas, column, container, pick_list, row, scrollable, slider, space, stack, text,
+    toggler,
+};
+use iced::{
+    Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
+    mouse,
+};
 
 use crate::anki::{reader, validator};
+use crate::audio::capture::{self, MicMonitorHandle, RecordingSession};
 use crate::audio::playback;
 use crate::models::{
     AnkiCard, AnkiCollectionSummary, AnkiRawNote, AppErrorToast, AppSettings, DailyGoal,
-    DailyStreak, DeckAudioReport, DeckConfig, DeckWorkspaceConfig, NavTab,
-    PlaybackSpeed, PracticeMode, ResolvedTheme, ThemePreference,
+    DailyStreak, DeckAudioReport, DeckConfig, DeckWorkspaceConfig, InputDeviceInfo,
+    MicLevelSnapshot, NavTab, PlaybackSpeed, PracticeMode, RecordedTake, ResolvedTheme,
+    ThemePreference, VadConfig,
 };
 use crate::storage;
 use crate::ui::setup::{NONE_FIELD_OPTION, SetupSourceMode, SetupState};
 use crate::ui::theme::ThemeTokens;
 
 const SAMPLE_PREVIEW_LIMIT: usize = 25;
+const SYSTEM_DEFAULT_MIC_OPTION: &str = "System Default";
 
 /// Top-level UI messages handled by [`KotodamaApp`].
 #[derive(Debug, Clone)]
@@ -51,6 +61,26 @@ pub enum Message {
     SelectPlaybackSpeed(PlaybackSpeed),
     /// Updates the daily card goal preset.
     SetDailyGoalCards(u32),
+    /// Refreshes the list of available microphone input devices.
+    RefreshInputDevices,
+    /// Receives the enumerated list of microphone input devices.
+    InputDevicesLoaded(Result<Vec<InputDeviceInfo>, String>),
+    /// Selects a preferred microphone input device (`System Default` clears override).
+    SelectInputDevice(String),
+    /// Adjusts the Voice Activity Detection RMS speech sensitivity threshold.
+    SetVadRmsThreshold(f32),
+    /// Adjusts the trailing silence auto-stop duration preset in milliseconds.
+    SetVadSilenceMs(u64),
+    /// Starts or stops the live microphone calibration level monitor in Settings.
+    ToggleMicCalibration,
+    /// Polls live microphone monitor or active recording telemetry on a timer tick.
+    MicMonitorTick,
+    /// Starts or stops a short microphone test recording in Settings.
+    ToggleTestRecording,
+    /// Plays back the most recently recorded Settings test take.
+    PlayTestTake,
+    /// Receives the completion result of playing the Settings test take.
+    TestTakePlaybackFinished(Result<(), String>),
     /// Switches between local `collection.anki2` and AnkiConnect setup modes.
     SelectSetupSourceMode(SetupSourceMode),
     /// Updates the local `collection.anki2` path input.
@@ -134,6 +164,12 @@ pub struct KotodamaApp {
     setup_state: SetupState,
     streak: DailyStreak,
     settings: AppSettings,
+    input_devices: Vec<InputDeviceInfo>,
+    mic_monitor: Option<MicMonitorHandle>,
+    mic_recording: Option<RecordingSession>,
+    mic_level: MicLevelSnapshot,
+    last_test_take: Option<RecordedTake>,
+    is_playing_test_take: bool,
     system_is_dark: Option<bool>,
     settings_path: Option<PathBuf>,
     deck_config_path: Option<PathBuf>,
@@ -156,6 +192,12 @@ impl Default for KotodamaApp {
             setup_state: SetupState::default(),
             streak,
             settings,
+            input_devices: Vec::new(),
+            mic_monitor: None,
+            mic_recording: None,
+            mic_level: MicLevelSnapshot::default(),
+            last_test_take: None,
+            is_playing_test_take: false,
             system_is_dark: None,
             settings_path: None,
             deck_config_path: None,
@@ -222,7 +264,16 @@ impl KotodamaApp {
             }
         }
 
-        (app, iced::system::theme().map(Message::SystemThemeChanged))
+        (
+            app,
+            Task::batch([
+                iced::system::theme().map(Message::SystemThemeChanged),
+                Task::perform(
+                    run_blocking(capture::list_input_devices),
+                    Message::InputDevicesLoaded,
+                ),
+            ]),
+        )
     }
 
     /// Creates an application instance bound to explicit config paths for testing.
@@ -250,9 +301,16 @@ impl KotodamaApp {
         theme::kotodama_theme(self.resolved_theme())
     }
 
-    /// Subscribes to live OS light/dark theme change notifications.
+    /// Subscribes to live OS light/dark theme change notifications and active mic telemetry.
     pub fn subscription(&self) -> Subscription<Message> {
-        iced::system::theme_changes().map(Message::SystemThemeChanged)
+        let theme_sub = iced::system::theme_changes().map(Message::SystemThemeChanged);
+        if self.mic_monitor.is_some() || self.mic_recording.is_some() {
+            let mic_sub = iced::time::every(Duration::from_millis(50))
+                .map(|_| Message::MicMonitorTick);
+            Subscription::batch([theme_sub, mic_sub])
+        } else {
+            theme_sub
+        }
     }
 
     /// Records a recoverable error into the dismissible toast stack.
@@ -293,6 +351,9 @@ impl KotodamaApp {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SelectTab(tab) => {
+                if self.active_tab == NavTab::Settings && tab != NavTab::Settings {
+                    self.stop_mic_activity();
+                }
                 self.active_tab = tab;
             }
             Message::SelectPracticeMode(mode) => {
@@ -330,6 +391,189 @@ impl KotodamaApp {
                 self.settings.daily_goal = goal;
                 self.streak.daily_goal = goal;
                 self.persist_settings();
+            }
+            Message::RefreshInputDevices => {
+                return Task::perform(
+                    run_blocking(capture::list_input_devices),
+                    Message::InputDevicesLoaded,
+                );
+            }
+            Message::InputDevicesLoaded(result) => match result {
+                Ok(devices) => {
+                    self.input_devices = devices;
+                }
+                Err(err_msg) => {
+                    let err = anyhow::anyhow!(err_msg);
+                    self.report_error(
+                        "Microphone Detection Failed",
+                        &err,
+                        Some("Connect a microphone and click Refresh Mics.".to_string()),
+                    );
+                }
+            },
+            Message::SelectInputDevice(choice) => {
+                let preferred = if choice == SYSTEM_DEFAULT_MIC_OPTION {
+                    None
+                } else {
+                    Some(choice)
+                };
+                self.settings.preferred_input_device = preferred;
+                self.persist_settings();
+
+                if self.mic_monitor.is_some() {
+                    self.mic_monitor = None;
+                    self.mic_level = MicLevelSnapshot::default();
+                    match MicMonitorHandle::start(
+                        self.settings.preferred_input_device.as_deref(),
+                        self.settings.vad_rms_threshold,
+                    ) {
+                        Ok(handle) => {
+                            self.mic_monitor = Some(handle);
+                        }
+                        Err(err) => {
+                            self.report_error(
+                                "Microphone Unavailable",
+                                &err,
+                                Some("Pick System Default or click Refresh Mics.".to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+            Message::SetVadRmsThreshold(value) => {
+                let clamped = value.clamp(0.005, 0.15);
+                self.settings.vad_rms_threshold = clamped;
+                if let Some(monitor) = &self.mic_monitor {
+                    monitor.set_vad_threshold(clamped);
+                }
+                self.persist_settings();
+            }
+            Message::SetVadSilenceMs(ms) => {
+                self.settings.vad_silence_ms = ms;
+                self.persist_settings();
+            }
+            Message::ToggleMicCalibration => {
+                if let Some(session) = self.mic_recording.take() {
+                    drop(session);
+                }
+                if let Some(mut monitor) = self.mic_monitor.take() {
+                    monitor.stop();
+                    self.mic_level = MicLevelSnapshot::default();
+                } else {
+                    match MicMonitorHandle::start(
+                        self.settings.preferred_input_device.as_deref(),
+                        self.settings.vad_rms_threshold,
+                    ) {
+                        Ok(handle) => {
+                            self.mic_level = handle.snapshot();
+                            self.mic_monitor = Some(handle);
+                        }
+                        Err(err) => {
+                            self.report_error(
+                                "Could Not Start Mic Calibration",
+                                &err,
+                                Some("Verify your microphone is plugged in and permissions allow audio capture.".to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+            Message::MicMonitorTick => {
+                if let Some(session) = self.mic_recording.as_ref() {
+                    self.mic_level = session.snapshot();
+                    if let Some(err_msg) = session.take_error() {
+                        self.mic_recording = None;
+                        self.mic_level = MicLevelSnapshot::default();
+                        let err = anyhow::anyhow!(err_msg);
+                        self.report_error(
+                            "Microphone Stream Interrupted",
+                            &err,
+                            Some("Check your microphone connection and try again.".to_string()),
+                        );
+                    } else if session.is_finished()
+                        && let Some(finished_session) = self.mic_recording.take()
+                    {
+                        self.finalize_test_recording(finished_session);
+                    }
+                } else if let Some(monitor) = self.mic_monitor.as_ref() {
+                    self.mic_level = monitor.snapshot();
+                    if let Some(err_msg) = monitor.take_error() {
+                        self.mic_monitor = None;
+                        self.mic_level = MicLevelSnapshot::default();
+                        let err = anyhow::anyhow!(err_msg);
+                        self.report_error(
+                            "Microphone Monitor Interrupted",
+                            &err,
+                            Some("Reconnect your microphone or switch input devices.".to_string()),
+                        );
+                    }
+                }
+            }
+            Message::ToggleTestRecording => {
+                if let Some(mut monitor) = self.mic_monitor.take() {
+                    monitor.stop();
+                }
+                if let Some(session) = self.mic_recording.take() {
+                    self.finalize_test_recording(session);
+                } else {
+                    let vad_config = VadConfig::from_settings(&self.settings);
+                    match RecordingSession::start(
+                        self.settings.preferred_input_device.as_deref(),
+                        vad_config,
+                    ) {
+                        Ok(session) => {
+                            self.mic_level = session.snapshot();
+                            self.mic_recording = Some(session);
+                        }
+                        Err(err) => {
+                            self.report_error(
+                                "Could Not Start Test Recording",
+                                &err,
+                                Some("Check your microphone selection in Settings and try again.".to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+            Message::PlayTestTake => {
+                let Some(take) = self.last_test_take.as_ref() else {
+                    self.report_warning(
+                        "No Test Recording Yet",
+                        "Record a short test clip first to preview playback.",
+                        None,
+                    );
+                    return Task::none();
+                };
+                let audio = if take.trimmed_audio.samples.is_empty() {
+                    take.raw_audio.clone()
+                } else {
+                    take.trimmed_audio.clone()
+                };
+                if audio.samples.is_empty() {
+                    self.report_warning(
+                        "Empty Test Recording",
+                        "The recorded clip contained zero audio samples.",
+                        Some("Speak louder or adjust your VAD threshold and try again.".to_string()),
+                    );
+                    return Task::none();
+                }
+                let speed = self.settings.playback_speed;
+                self.is_playing_test_take = true;
+                return Task::perform(
+                    run_blocking(move || playback::play_decoded_audio(audio, speed)),
+                    Message::TestTakePlaybackFinished,
+                );
+            }
+            Message::TestTakePlaybackFinished(result) => {
+                self.is_playing_test_take = false;
+                if let Err(err_msg) = result {
+                    let err = anyhow::anyhow!(err_msg);
+                    self.report_error(
+                        "Test Playback Failed",
+                        &err,
+                        Some("Verify your output speaker or headphone device is connected.".to_string()),
+                    );
+                }
             }
             Message::SelectSetupSourceMode(mode) => {
                 self.setup_state.source_mode = mode;
@@ -612,14 +856,14 @@ impl KotodamaApp {
             }
             Message::TriggerRecoverableAction => {
                 let message = if self.deck_workspace.active_deck.is_some() {
-                    "Audio recording, pitch DSP, and analytics export are scheduled for Phases 3–6."
+                    "Mora scoring, FSRS scheduling, interactive practice canvases, and analytics exports are scheduled for Phases 4–6."
                 } else {
-                    "Connect and validate an Anki deck in Setup first, then check back as Phases 3–6 land."
+                    "Connect and validate an Anki deck in Setup first, then check back as Phases 4–6 land."
                 };
                 self.report_warning(
                     "Upcoming Practice & Export Feature",
                     message,
-                    Some("Your deck and field mappings are ready in Setup.".to_string()),
+                    Some("Your deck, audio pipeline, and mic calibration are ready.".to_string()),
                 );
             }
             Message::TriggerSampleError => {
@@ -821,10 +1065,44 @@ impl KotodamaApp {
         };
 
         self.setup_state.is_playing_audio = true;
+        let speed = self.settings.playback_speed;
         Task::perform(
-            run_blocking(move || playback::play_audio_file(&audio_path)),
+            run_blocking(move || playback::play_audio_file_at_speed(&audio_path, speed)),
             Message::AudioPlaybackFinished,
         )
+    }
+
+    fn stop_mic_activity(&mut self) {
+        if let Some(mut monitor) = self.mic_monitor.take() {
+            monitor.stop();
+        }
+        if let Some(session) = self.mic_recording.take() {
+            drop(session);
+        }
+        self.mic_level = MicLevelSnapshot::default();
+    }
+
+    fn finalize_test_recording(&mut self, session: RecordingSession) {
+        self.mic_level = MicLevelSnapshot::default();
+        match session.finish() {
+            Ok(take) => {
+                if !take.speech_detected {
+                    self.report_warning(
+                        "No Speech Above VAD Threshold",
+                        "No frames crossed the active VAD sensitivity threshold during that take.",
+                        Some("Speak closer to the mic or lower the VAD sensitivity slider.".to_string()),
+                    );
+                }
+                self.last_test_take = Some(take);
+            }
+            Err(err) => {
+                self.report_error(
+                    "Test Recording Failed",
+                    &err,
+                    Some("Check your microphone connection and try recording again.".to_string()),
+                );
+            }
+        }
     }
 
     fn handle_validate_and_save_deck(&mut self) -> Task<Message> {
@@ -1061,6 +1339,8 @@ impl KotodamaApp {
         .padding(20)
         .style(theme::card_style);
 
+        let mic_calibration_card = self.render_mic_calibration_card(resolved_theme, colors);
+
         let speed_buttons = [PlaybackSpeed::Slow, PlaybackSpeed::Normal]
             .into_iter()
             .fold(row![].spacing(10), |r, speed| {
@@ -1193,8 +1473,14 @@ impl KotodamaApp {
             .style(theme::card_style)
         };
 
-        column![appearance_card, ergonomics_card, exclusions_card, fsrs_card]
-            .spacing(18)
+        column![
+            appearance_card,
+            mic_calibration_card,
+            ergonomics_card,
+            exclusions_card,
+            fsrs_card
+        ]
+        .spacing(18)
             .width(Length::Fill)
             .into()
     }
@@ -1249,6 +1535,334 @@ impl KotodamaApp {
             .align_x(Horizontal::Right)
             .align_y(Vertical::Bottom)
             .into()
+    }
+
+    fn render_mic_calibration_card(
+        &self,
+        resolved_theme: ResolvedTheme,
+        colors: &'static ThemeTokens,
+    ) -> Element<'_, Message> {
+        let mut device_options = vec![SYSTEM_DEFAULT_MIC_OPTION.to_string()];
+        for device in &self.input_devices {
+            if !device_options.contains(&device.name) {
+                device_options.push(device.name.clone());
+            }
+        }
+        if let Some(preferred) = &self.settings.preferred_input_device
+            && !device_options.contains(preferred)
+        {
+            device_options.push(preferred.clone());
+        }
+
+        let selected_device = self
+            .settings
+            .preferred_input_device
+            .clone()
+            .unwrap_or_else(|| SYSTEM_DEFAULT_MIC_OPTION.to_string());
+
+        let is_monitoring = self.mic_monitor.is_some();
+        let is_recording = self.mic_recording.is_some();
+        let is_active = is_monitoring || is_recording;
+
+        let (status_label, status_color, status_bg, status_border) = if !is_active {
+            (
+                "Idle",
+                colors.text_muted,
+                colors.card_muted,
+                colors.border,
+            )
+        } else if self.mic_level.is_clipping {
+            (
+                "Clipping!",
+                colors.danger,
+                colors.danger_soft,
+                colors.danger,
+            )
+        } else if self.mic_level.is_speech {
+            (
+                "Speech Detected",
+                colors.sage,
+                colors.sage_soft,
+                colors.sage,
+            )
+        } else {
+            (
+                "Below VAD",
+                colors.amber,
+                colors.amber_soft,
+                colors.amber,
+            )
+        };
+
+        let active_device_caption = if let Some(session) = &self.mic_recording {
+            format!(
+                "Recording on {} · {:.1}s",
+                session.device_name(),
+                session.elapsed_ms() as f32 / 1000.0
+            )
+        } else if let Some(monitor) = &self.mic_monitor {
+            format!(
+                "Monitoring {} ({} Hz)",
+                monitor.device_name(),
+                monitor.sample_rate()
+            )
+        } else if let Some(default_dev) = self.input_devices.iter().find(|d| d.is_default) {
+            format!("Default mic: {}", default_dev.name)
+        } else if self.input_devices.is_empty() {
+            "No microphone detected yet — click Refresh Mics or connect an input device.".to_string()
+        } else {
+            format!("{} microphone(s) available.", self.input_devices.len())
+        };
+
+        let monitor_button_label = if is_monitoring {
+            "Stop Mic Test"
+        } else {
+            "Start Mic Test"
+        };
+        let record_button_label = if is_recording {
+            "Stop Recording"
+        } else {
+            "Record Test Take"
+        };
+
+        let mut play_take_button = button(
+            text(if self.is_playing_test_take {
+                "Playing Take..."
+            } else {
+                "Play Test Take"
+            })
+            .size(13),
+        )
+        .padding([8, 14])
+        .style(theme::secondary_button_style);
+        if self.last_test_take.is_some() && !self.is_playing_test_take && !is_recording {
+            play_take_button = play_take_button.on_press(Message::PlayTestTake);
+        }
+
+        let silence_presets = [600_u64, 1000, 1500]
+            .into_iter()
+            .fold(row![].spacing(10), |r, ms| {
+                let selected = self.settings.vad_silence_ms == ms;
+                r.push(
+                    button(text(format!("{ms} ms")).size(13))
+                        .padding([6, 12])
+                        .style(theme::pill_button_style(selected))
+                        .on_press(Message::SetVadSilenceMs(ms)),
+                )
+            });
+
+        let threshold_db = capture::rms_to_dbfs(self.settings.vad_rms_threshold);
+
+        let mut body = column![
+            row![
+                text("Microphone & VAD Calibration")
+                    .size(18)
+                    .color(colors.text_primary),
+                space().width(Length::Fill),
+                container(text(status_label).size(12).color(status_color))
+                    .padding([4, 10])
+                    .style(theme::badge_style(status_bg, status_border)),
+            ]
+            .align_y(Alignment::Center),
+            text("Verify your microphone gain stays green during normal speech without clipping, and tune the coral VAD speech threshold line.")
+                .size(14)
+                .color(colors.text_muted),
+            row![
+                pick_list(device_options, Some(selected_device), Message::SelectInputDevice)
+                    .width(Length::Fill)
+                    .style(theme::pick_list_style)
+                    .menu_style(theme::pick_list_menu_style),
+                button(text("Refresh Mics").size(13))
+                    .padding([8, 14])
+                    .style(theme::secondary_button_style)
+                    .on_press(Message::RefreshInputDevices),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+            canvas(MicMeterProgram {
+                meter_ratio: if is_active {
+                    self.mic_level.meter_ratio
+                } else {
+                    0.0
+                },
+                vad_threshold_ratio: capture::vad_threshold_to_meter_ratio(
+                    self.settings.vad_rms_threshold,
+                ),
+                is_speech: self.mic_level.is_speech,
+                is_clipping: self.mic_level.is_clipping,
+                is_active,
+                resolved_theme,
+            })
+            .width(Length::Fill)
+            .height(24),
+            row![
+                text(format!(
+                    "{:.1} dBFS",
+                    if is_active {
+                        self.mic_level.db_fs
+                    } else {
+                        -60.0
+                    }
+                ))
+                .size(13)
+                .color(colors.text_primary),
+                space().width(Length::Fill),
+                text(active_device_caption)
+                    .size(12)
+                    .color(colors.text_muted),
+            ]
+            .align_y(Alignment::Center),
+            row![
+                button(text(monitor_button_label).size(13))
+                    .padding([8, 14])
+                    .style(theme::primary_button_style)
+                    .on_press(Message::ToggleMicCalibration),
+                button(text(record_button_label).size(13))
+                    .padding([8, 14])
+                    .style(theme::secondary_button_style)
+                    .on_press(Message::ToggleTestRecording),
+                play_take_button,
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(12);
+
+        if let Some(take) = &self.last_test_take {
+            body = body.push(
+                container(
+                    text(format!(
+                        "Last test take: {} ms raw · {} ms VAD-trimmed · peak {:.2} · {}",
+                        take.raw_audio.duration_ms(),
+                        take.trimmed_audio.duration_ms(),
+                        take.peak_level,
+                        take.stop_reason.label()
+                    ))
+                    .size(12)
+                    .color(colors.text_muted),
+                )
+                .width(Length::Fill)
+                .padding([8, 12])
+                .style(theme::muted_card_style),
+            );
+        }
+
+        body = body
+            .push(
+                column![
+                    row![
+                        text("VAD Speech Sensitivity")
+                            .size(14)
+                            .color(colors.text_muted),
+                        space().width(Length::Fill),
+                        text(format!(
+                            "RMS {:.3} ({:.1} dBFS)",
+                            self.settings.vad_rms_threshold, threshold_db
+                        ))
+                        .size(13)
+                        .color(colors.coral_text),
+                    ]
+                    .align_y(Alignment::Center),
+                    slider(
+                        0.005_f32..=0.15_f32,
+                        self.settings.vad_rms_threshold,
+                        Message::SetVadRmsThreshold,
+                    )
+                    .step(0.005_f32)
+                    .style(theme::slider_style),
+                ]
+                .spacing(6),
+            )
+            .push(
+                column![
+                    text("Trailing Silence Auto-Stop")
+                        .size(14)
+                        .color(colors.text_muted),
+                    silence_presets,
+                ]
+                .spacing(8),
+            );
+
+        container(body)
+            .width(Length::Fill)
+            .padding(20)
+            .style(theme::card_style)
+            .into()
+    }
+}
+
+struct MicMeterProgram {
+    meter_ratio: f32,
+    vad_threshold_ratio: f32,
+    is_speech: bool,
+    is_clipping: bool,
+    is_active: bool,
+    resolved_theme: ResolvedTheme,
+}
+
+impl canvas::Program<Message> for MicMeterProgram {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let colors = theme::tokens(self.resolved_theme);
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let width = bounds.width.max(1.0);
+        let height = bounds.height.max(1.0);
+
+        let track = canvas::Path::rounded_rectangle(Point::ORIGIN, Size::new(width, height), 8.0.into());
+        frame.fill(&track, colors.card_muted);
+        frame.stroke(
+            &track,
+            canvas::Stroke::default()
+                .with_color(colors.border)
+                .with_width(1.0),
+        );
+
+        let clamped_level = self.meter_ratio.clamp(0.0, 1.0);
+        if self.is_active && clamped_level > 0.005 {
+            let fill_width = (width * clamped_level).max(4.0).min(width);
+            let fill_color = if self.is_clipping {
+                colors.danger
+            } else if self.is_speech {
+                colors.sage
+            } else if clamped_level > 0.78 {
+                colors.amber
+            } else {
+                Color::from_rgba(
+                    colors.text_muted.r,
+                    colors.text_muted.g,
+                    colors.text_muted.b,
+                    0.55,
+                )
+            };
+            let level_bar = canvas::Path::rounded_rectangle(
+                Point::new(1.0, 1.0),
+                Size::new((fill_width - 2.0).max(2.0), (height - 2.0).max(2.0)),
+                7.0.into(),
+            );
+            frame.fill(&level_bar, fill_color);
+        }
+
+        let marker_x = (width * self.vad_threshold_ratio.clamp(0.02, 0.98)).clamp(2.0, width - 2.0);
+        let threshold_line = canvas::Path::line(
+            Point::new(marker_x, 2.0),
+            Point::new(marker_x, (height - 2.0).max(2.0)),
+        );
+        frame.stroke(
+            &threshold_line,
+            canvas::Stroke::default()
+                .with_color(colors.coral)
+                .with_width(2.5),
+        );
+
+        vec![frame.into_geometry()]
     }
 }
 
@@ -1666,5 +2280,50 @@ mod tests {
 
         let _ = app.update(Message::ClearAllToasts);
         assert!(app.toasts.is_empty());
+    }
+
+    #[test]
+    fn mic_calibration_settings_update_and_persist() -> anyhow::Result<()> {
+        let (dir, settings_path, deck_path) = temp_config_paths("mic_calibration");
+        let mut app = KotodamaApp::with_config_paths(settings_path.clone(), deck_path);
+
+        let _ = app.update(Message::SetVadRmsThreshold(0.045));
+        assert!((app.settings.vad_rms_threshold - 0.045).abs() < 1e-6);
+
+        let _ = app.update(Message::SetVadRmsThreshold(0.99));
+        assert!((app.settings.vad_rms_threshold - 0.15).abs() < 1e-6);
+
+        let _ = app.update(Message::SetVadSilenceMs(600));
+        assert_eq!(app.settings.vad_silence_ms, 600);
+
+        let _ = app.update(Message::SelectInputDevice("USB Podcast Mic".to_string()));
+        assert_eq!(
+            app.settings.preferred_input_device.as_deref(),
+            Some("USB Podcast Mic")
+        );
+
+        let _ = app.update(Message::SelectInputDevice(
+            SYSTEM_DEFAULT_MIC_OPTION.to_string(),
+        ));
+        assert_eq!(app.settings.preferred_input_device, None);
+
+        let _ = app.update(Message::InputDevicesLoaded(Ok(vec![InputDeviceInfo {
+            name: "Built-in Mic".to_string(),
+            is_default: true,
+        }])));
+        assert_eq!(app.input_devices.len(), 1);
+
+        let _ = app.update(Message::InputDevicesLoaded(Err(
+            "Audio daemon unavailable".to_string(),
+        )));
+        assert_eq!(app.toasts.len(), 1);
+
+        let persisted = storage::load_settings(&settings_path)?;
+        assert!((persisted.vad_rms_threshold - 0.15).abs() < 1e-6);
+        assert_eq!(persisted.vad_silence_ms, 600);
+        assert_eq!(persisted.preferred_input_device, None);
+
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

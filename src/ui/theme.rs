@@ -2,7 +2,7 @@
 
 use iced::overlay::menu;
 use iced::theme::Palette;
-use iced::widget::{button, container, pick_list, text_input};
+use iced::widget::{button, container, pick_list, slider, text_input};
 use iced::{Border, Color, Shadow, Theme, Vector, color};
 
 use crate::models::{ErrorSeverity, ResolvedTheme};
@@ -455,6 +455,33 @@ pub fn pick_list_menu_style(theme: &Theme) -> menu::Style {
     }
 }
 
+/// Adaptive warm Light/Dark style for range sliders such as VAD sensitivity calibration.
+pub fn slider_style(theme: &Theme, status: slider::Status) -> slider::Style {
+    let colors = tokens_for_theme(theme);
+    let accent = match status {
+        slider::Status::Active => colors.coral,
+        slider::Status::Hovered | slider::Status::Dragged => colors.coral_hover,
+    };
+
+    slider::Style {
+        rail: slider::Rail {
+            backgrounds: (accent.into(), colors.border.into()),
+            width: 6.0,
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 3.0.into(),
+            },
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle { radius: 8.0 },
+            background: accent.into(),
+            border_width: 1.5,
+            border_color: colors.card_surface,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +547,10 @@ mod tests {
             let menu_appearance = pick_list_menu_style(&theme);
             assert_eq!(menu_appearance.selected_text_color, colors.coral_text);
             assert_eq!(menu_appearance.background, colors.card_surface.into());
+
+            let hovered_slider = slider_style(&theme, slider::Status::Hovered);
+            assert_eq!(hovered_slider.handle.background, colors.coral_hover.into());
+            assert_eq!(hovered_slider.handle.border_color, colors.card_surface);
         }
     }
 }
