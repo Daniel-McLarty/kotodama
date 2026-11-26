@@ -21,12 +21,13 @@
   - Tracks daily streaks, configurable daily goals (cards or minutes), accuracy over time, per-card pitch error %, and top-5 confusion matrices per kana (e.g., `つ: 82% correct — 5% す, 4% ず, 3% すう, 6% unknown`).
   - Exports session history, confusion matrices, and pitch error logs to **CSV** and **JSON**.
 
-## Current Status (`v0.2.0`)
+## Current Status (`v0.2.1`)
 
 Phase 2 (Anki Ingestion & Field Mapper) is complete:
 - Safe temporary-copy `collection.anki2` reader (classic & modern Anki SQLite schemas, WAL-aware, zero DB locking) and live `AnkiConnect` (`http://127.0.0.1:8765`) ingestion filtering exclusively for graduated cards (`queue = 2`).
-- Interactive Setup view with native file/folder pickers, deck selector, 5-field mapping dropdowns (`Target Word / Expression`, `Kana Reading`, optional `Example Sentence`, `Word Audio`, optional `Sentence Audio`), live sample card preview, and **Play Test Audio** button.
-- Garbage-In, Garbage-Out (GIGO) pre-flight validator flagging missing clips, clips shorter than `200ms`, clipped audio, and decode errors, plus local persistence of deck configs and per-deck field mappings (`deck_config.json`).
+- Interactive Setup view with native file/folder pickers, deck selector, 5-field mapping dropdowns (`Target Word / Expression`, `Kana Reading`, optional `Example Sentence`, `Word Audio`, optional `Sentence Audio`), live sample card preview, and **Play Test Audio** button powered by a persistent audio playback sink.
+- Garbage-In, Garbage-Out (GIGO) pre-flight validator flagging missing clips, clips shorter than `200ms`, clipped audio, and decode errors, plus local persistence of deck configs, per-deck field mappings, and excluded card IDs (`deck_config.json`).
+- Per-deck card exclusions (**Exclude Card**, **Auto-Exclude Invalid Audio Cards**, and **Restore Excluded** in Setup and Settings) to skip problematic cards without altering your Anki deck.
 - Adaptive cross-platform Light & Dark mode (`System`, `Light`, `Dark`) and dismissible toast overlay for recoverable errors.
 
 Upcoming phases add microphone capture & $F_0$/DTW DSP (`v0.3.0`), SQLite/FSRS scheduling & exporters (`v0.4.0`), interactive practice canvases (`v0.5.0`), and full analytics (`v0.6.0`).
@@ -39,6 +40,7 @@ Upcoming phases add microphone capture & $F_0$/DTW DSP (`v0.3.0`), SQLite/FSRS s
 2. Pick your target deck from the **Deck** dropdown (subdecks are included automatically, and only graduated `queue = 2` cards are loaded).
 3. Verify or adjust the **Note Field Mapping** dropdowns while watching the **Live Sample Card Preview** update in real time, and click **Play Test Audio** to confirm reference playback.
 4. Click **Validate Audio & Save Deck** to run GIGO pre-flight checks across all learned cards and persist your deck mapping locally.
+5. Optionally click **Exclude Card** in the card preview or **Auto-Exclude Invalid Audio Cards** in the GIGO banner to filter problematic cards out of active practice queues (you can inspect or restore excluded cards anytime in Setup or Settings).
 
 ## Planned Keyboard Shortcuts
 

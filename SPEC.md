@@ -19,6 +19,7 @@
   - Word Audio (`[sound:...]`)
   - Sentence Audio (`[sound:...]`)
 - Include a live preview of a sample card and a "Play Test Audio" button. Persist deck mappings in local config.
+- **Non-Destructive Card Exclusion:** Allow users to exclude individual cards or auto-exclude all cards with flagged audio quality issues per deck (persisted locally and restorable anytime in Setup or Settings) without modifying the underlying Anki deck.
 
 ### B. Practice Modes & Ergonomics
 1. **Mora Purity Testing:** Isolates individual kana/mora clarity (e.g., distinguishing つ, す, ず).

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-26
+
+### Added
+- Per-deck card exclusions (`excluded_card_ids` and `excluded_card_labels` in `DeckWorkspaceConfig`) persisted locally in `deck_config.json`, with backwards-compatible migration from `0.2.0` configs.
+- **Exclude Card** / **Restore Card** buttons in the Setup live card preview, **Auto-Exclude Invalid Audio Cards**, **View Excluded**, and **Restore Excluded** controls in the Setup GIGO banner, and an **Excluded Cards** management section in Settings.
+- Active practice queue filtering (`active_practice_cards`) and subtle excluded-card count badges in Setup, Practice, and Settings.
+
+### Fixed
+- Kept `rodio`'s `MixerDeviceSink` alive inside a persistent background playback worker thread with `.log_on_drop(false)` in `src/audio/playback.rs`, eliminating premature sink drops and stderr log spam on repeated test audio clicks.
+
 ## [0.2.0] - 2026-11-26
 
 ### Added
