@@ -81,15 +81,11 @@ kotodama/
         └── dashboard.rs       # Streaks, accuracy graphs, per-kana mistake breakdown
 ```
 ## GitHub Remote, GPG Signing & CI/CD
-
 - Remote & Branch: The remote is GitHub (origin) and primary development/releases live on main.
-
  - **GPG** Signing: Commits and annotated tags use **GPG** signing. Do not pass --no-gpg-sign or override signing configs. Allow interactive time/retries if a **GPG** passphrase prompt appears, and pause to notify the user if **GPG** signing fails due to a locked keyring.
-
 - Repository Hygiene & CI:
-
     - Create and maintain .gitignore (excluding /target, local .db/.sqlite files, temporary Anki copies, and OS/editor artifacts).
-
     - Set up .github/workflows/ci.yml to run cargo test, cargo clippy --all-targets -- -D warnings, and cargo doc --no-deps on pushes and pull requests to main (install libasound2-dev and libxkbcommon-dev on Ubuntu runners so cpal and iced build cleanly in CI).
-
     - If gh **CLI** is authenticated, you may also create GitHub Releases corresponding to SemVer tags (v0.1.0 through v1.0.0) using the matching **CHANGELOG**.md notes.
+
+Whenever the user says 'Start Phase X', read SPEC.md and ROADMAP.md and execute Phase X following all rules in this file.

@@ -30,6 +30,11 @@
    - **Slow-Motion Reference (`0.75x` / `1.0x`):** Pitch-preserving playback slowdown for fast native sentences.
    - **Blind / Audio-Only Mode:** Toggle to hide the text until after speaking.
    - **Daily Session Cap:** Configurable daily goal (e.g., 10 cards or 5 minutes) to keep sessions fun and sustainable.
+5. **Japanese Allophone & Devoicing Rules (src/scoring/mora.rs):** 
+   - Map target kana to sets of valid standard realizations rather than single rigid acoustic templates.
+   - Accept both oral [g] and nasal [ŋ] as valid for the が-row (が・ぎ・ぐ・げ・ご).
+   - Accept devoiced い/う (e.g., です, ます, 好き) when the voiceless consonant holds the full mora beat.
+   - Accept assimilated nasals ([m], [n], [ŋ], [ɴ]) for syllabic ん, and treat じ/ぢ and ず/づ as equivalent.
 
 ### C. Analytics, Streaks & Mistake Breakdown
 - **Daily Streaks:** Track consecutive days practiced, daily goal progress, and total sessions.
