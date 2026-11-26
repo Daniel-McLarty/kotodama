@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
+### Added
+- Safe temporary-copy SQLite reader (`src/anki/reader.rs`) supporting both classic (`col.decks`/`col.models`) and modern (`decks`/`notetypes`/`fields` with `unicase` collation and WAL sidecars) Anki collections, strictly filtering graduated cards (`queue = 2`) and deduplicating multi-template notes.
+- AnkiConnect (`http://127.0.0.1:8765`) client for listing decks, discovering media directories, and fetching learned (`queue = 2`) cards.
+- Symphonia-based multi-format audio decoder and Rodio playback helper (`src/audio/playback.rs`) for previewing `.mp3`, `.ogg`, `.wav`, `.flac`, and `.m4a` clips.
+- Garbage-In, Garbage-Out (GIGO) audio pre-flight validator (`src/anki/validator.rs`) flagging missing media files, clips shorter than 200 ms, digital clipping, and decode failures, with aggregated `DeckAudioReport` summaries.
+- Persistent deck workspace configuration (`deck_config.json`) in `src/storage/mod.rs` storing the active deck and per-deck field mappings.
+- Interactive Setup UI (`src/ui/setup.rs`) and adaptive `text_input`/`pick_list` theme styles (`src/ui/theme.rs`) featuring native file/folder pickers (`rfd`), deck selector, 5-field mapping dropdowns with smart defaults, live sample card preview, test audio playback, and non-fatal error toasts.
+
+### Changed
+- Centralized domain models in `src/models.rs` extended with `AnkiDeckSummary`, `AnkiNoteType`, `AnkiRawNote`, `AnkiCollectionSummary`, `DeckAudioReport`, `DeckWorkspaceConfig`, `DecodedAudio`, and `AudioQualityIssue::summary`.
+- Practice view status badge now displays the count of imported learned cards when a deck is connected.
+
 ## [0.1.1] - 2026-11-26
 
 ### Added

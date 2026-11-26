@@ -8,7 +8,7 @@ Execute one phase at a time. Commit and push logically after each meaningful uni
   - Set up the warm/playful Iced theme in `src/ui/theme.rs`, basic navigation shell (Setup, Practice, Dashboard, Settings), and dismissible error toast/popup handling.
   - Add adaptive cross-platform Light/Dark mode (`v0.1.1`) with `ThemePreference` (`System`, `Light`, `Dark`), live OS detection, top-bar toggle, and persisted Settings selector.
 
-- [ ] **Phase 2: Anki Ingestion & Field Mapper (`v0.2.0`)**
+- [x] **Phase 2: Anki Ingestion & Field Mapper (`v0.2.0`)**
   - Implement safe `collection.anki2` temp-copy reader in `src/anki/reader.rs` filtering for learned/review cards (`queue = 2`).
   - Implement audio pre-flight validator in `src/anki/validator.rs` (missing files, `< 200ms`, clipping).
   - Build the Setup UI with deck picker, field-mapping dropdowns, GIGO warning banner, live card preview, and graceful file-picker error popups.
