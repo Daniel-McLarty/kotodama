@@ -2,7 +2,7 @@
 
 Execute one phase at a time. Commit and push logically after each meaningful unit of work using Conventional Commits. At the end of each phase, run `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo doc --no-deps`, update `CHANGELOG.md` and `README.md`, bump `Cargo.toml`, tag the version, and push with `--follow-tags`.
 
-- [ ] **Phase 1: Foundation & Centralized Models (`v0.1.0`)**
+- [x] **Phase 1: Foundation & Centralized Models (`v0.1.0`)**
   - Initialize Cargo project (`kotodama`), MPL-2.0 `LICENSE`, `CHANGELOG.md`, and initial `README.md`.
   - Define core domain structs and enums in `src/models.rs` (`DeckConfig`, `FieldMapping`, `AnkiCard`, `PracticeMode`, `PitchAnalysis`, `MoraAttempt`, `KanaStats`, `FsrsCardState`, `DailyStreak`, `AppErrorToast`).
   - Set up the warm/playful Iced theme in `src/ui/theme.rs`, basic navigation shell (Setup, Practice, Dashboard, Settings), and dismissible error toast/popup handling.

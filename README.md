@@ -21,6 +21,15 @@
   - Tracks daily streaks, configurable daily goals (cards or minutes), accuracy over time, per-card pitch error %, and top-5 confusion matrices per kana (e.g., `つ: 82% correct — 5% す, 4% ず, 3% すう, 6% unknown`).
   - Exports session history, confusion matrices, and pitch error logs to **CSV** and **JSON**.
 
+## Current Status (`v0.1.0`)
+
+Phase 1 (Foundation & Centralized Models) is complete:
+- Warm, playful Iced `0.14` desktop shell with Setup, Practice, Dashboard, and Settings navigation.
+- Centralized domain models with validation, streak/goal tracking, and per-kana mistake formatting.
+- Dismissible toast overlay for recoverable errors and warnings.
+
+Upcoming phases add Anki collection ingestion & GIGO audio validation (`v0.2.0`), microphone capture & $F_0$/DTW DSP (`v0.3.0`), SQLite/FSRS scheduling & exporters (`v0.4.0`), interactive practice canvases (`v0.5.0`), and full analytics (`v0.6.0`).
+
 ## Planned Keyboard Shortcuts
 
 | Shortcut | Action |
