@@ -6,6 +6,7 @@ Execute one phase at a time. Commit and push logically after each meaningful uni
   - Initialize Cargo project (`kotodama`), MPL-2.0 `LICENSE`, `CHANGELOG.md`, and initial `README.md`.
   - Define core domain structs and enums in `src/models.rs` (`DeckConfig`, `FieldMapping`, `AnkiCard`, `PracticeMode`, `PitchAnalysis`, `MoraAttempt`, `KanaStats`, `FsrsCardState`, `DailyStreak`, `AppErrorToast`).
   - Set up the warm/playful Iced theme in `src/ui/theme.rs`, basic navigation shell (Setup, Practice, Dashboard, Settings), and dismissible error toast/popup handling.
+  - Add adaptive cross-platform Light/Dark mode (`v0.1.1`) with `ThemePreference` (`System`, `Light`, `Dark`), live OS detection, top-bar toggle, and persisted Settings selector.
 
 - [ ] **Phase 2: Anki Ingestion & Field Mapper (`v0.2.0`)**
   - Implement safe `collection.anki2` temp-copy reader in `src/anki/reader.rs` filtering for learned/review cards (`queue = 2`).

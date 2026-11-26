@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-26
+
+### Added
+- `ThemePreference` (`System`, `Light`, `Dark`, defaulting to `System`) and `ResolvedTheme` enums in `src/models.rs`, persisted in `AppSettings`.
+- Local JSON settings persistence (`default_settings_path`, `load_settings`, `save_settings`) in `src/storage/mod.rs` using platform-standard config directories.
+- Adaptive warm Light and warm Dark palettes (`ThemeTokens`, `LIGHT_TOKENS`, `DARK_TOKENS`) in `src/ui/theme.rs` with warm charcoal/espresso surfaces and soft cream text in Dark mode.
+- Cross-platform OS color-scheme detection and live theme change subscription (`iced::system::theme` and `iced::system::theme_changes`), a quick theme toggle in the top navigation bar, and a `System` / `Light` / `Dark` selector in Settings.
+
+### Changed
+- Updated all UI views (`setup.rs`, `practice.rs`, `dashboard.rs`, `mod.rs`) to resolve colors dynamically from the active Light or Dark `ThemeTokens`.
+- Updated `SPEC.md`, `README.md`, and `ROADMAP.md` to document adaptive cross-platform theming and `v0.1.1`.
+
 ## [0.1.0] - 2026-11-26
 
 ### Added
