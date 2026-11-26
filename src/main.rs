@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+mod anki;
 mod models;
 mod storage;
 mod ui;

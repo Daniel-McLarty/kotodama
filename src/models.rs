@@ -138,7 +138,6 @@ impl DeckConfig {
 }
 
 /// Summary metadata for a single deck discovered in an Anki collection.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnkiDeckSummary {
     /// Numeric Anki deck identifier.
@@ -152,7 +151,6 @@ pub struct AnkiDeckSummary {
 }
 
 /// Note type definition and ordered field list from an Anki collection.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnkiNoteType {
     /// Numeric Anki note type (model) identifier.
@@ -164,7 +162,6 @@ pub struct AnkiNoteType {
 }
 
 /// Raw graduated Anki note fields prior to applying a user [`FieldMapping`].
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnkiRawNote {
     /// Representative Anki card ID (`cards.id`).
@@ -182,7 +179,6 @@ pub struct AnkiRawNote {
 }
 
 /// Discovered decks and note types loaded from an Anki collection source.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnkiCollectionSummary {
     /// Source connection details used to inspect the collection.

@@ -13,7 +13,7 @@ dirs = "7.0.0"
 iced = { version = "0.14.0", features = ["canvas", "tokio"] }
 rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal"] }
 rodio = "0.23.0"
-rusqlite = { version = "0.43.0", features = ["bundled"] }
+rusqlite = { version = "0.43.0", features = ["bundled", "collation"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 symphonia = { version = "0.6.1", features = ["mp3", "ogg", "vorbis", "pcm", "wav", "flac", "aac", "isomp4"] }
