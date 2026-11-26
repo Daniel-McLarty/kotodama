@@ -347,6 +347,7 @@ impl AnkiCard {
     pub const LEARNED_QUEUE: i32 = 2;
 
     /// Returns `true` when the card is in Anki's graduated/learned review queue.
+    #[allow(dead_code)]
     pub const fn is_learned(&self) -> bool {
         self.anki_queue == Self::LEARNED_QUEUE
     }

@@ -16,7 +16,6 @@ pub fn default_settings_path() -> Result<PathBuf> {
 }
 
 /// Resolves the platform-specific configuration file path for Kotodama deck workspace configs.
-#[allow(dead_code)]
 pub fn default_deck_config_path() -> Result<PathBuf> {
     Ok(kotodama_config_dir("deck configuration")?.join("deck_config.json"))
 }
@@ -32,13 +31,11 @@ pub fn save_settings(path: &Path, settings: &AppSettings) -> Result<()> {
 }
 
 /// Loads persisted [`DeckWorkspaceConfig`] from `path`, returning an empty workspace when missing.
-#[allow(dead_code)]
 pub fn load_deck_workspace(path: &Path) -> Result<DeckWorkspaceConfig> {
     load_json_or_default(path, "deck workspace")
 }
 
 /// Persists [`DeckWorkspaceConfig`] as pretty-printed JSON at `path`, creating parent directories as needed.
-#[allow(dead_code)]
 pub fn save_deck_workspace(path: &Path, workspace: &DeckWorkspaceConfig) -> Result<()> {
     save_json_pretty(path, workspace, "deck workspace")
 }

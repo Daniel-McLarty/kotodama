@@ -113,7 +113,6 @@ pub fn decode_audio_file(path: &Path) -> Result<DecodedAudio> {
 }
 
 /// Decodes and plays an audio clip on the default system output device until completion.
-#[allow(dead_code)]
 pub fn play_audio_file(path: &Path) -> Result<()> {
     let decoded = decode_audio_file(path)?;
 

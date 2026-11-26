@@ -79,14 +79,12 @@ pub fn validate_audio_clip(media_dir: &Path, filename: &str) -> Vec<AudioQuality
 }
 
 /// Validates a card's word and optional sentence audio clips, storing discovered issues on `card`.
-#[allow(dead_code)]
 pub fn validate_card_audio(card: &mut AnkiCard, media_dir: &Path) -> usize {
     let mut cache = HashMap::new();
     validate_card_audio_with_cache(card, media_dir, &mut cache)
 }
 
 /// Validates all cards in a deck against `media_dir` and returns an aggregated [`DeckAudioReport`].
-#[allow(dead_code)]
 pub fn validate_deck_cards(cards: &mut [AnkiCard], media_dir: &Path) -> DeckAudioReport {
     let mut cache: HashMap<String, Vec<AudioQualityIssue>> = HashMap::new();
     let mut report = DeckAudioReport {

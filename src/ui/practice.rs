@@ -12,6 +12,7 @@ pub fn view<'a>(
     active_mode: PracticeMode,
     settings: &'a AppSettings,
     streak: &'a DailyStreak,
+    loaded_card_count: usize,
     has_deck: bool,
     resolved_theme: ResolvedTheme,
 ) -> Element<'a, Message> {
@@ -31,7 +32,12 @@ pub fn view<'a>(
     );
 
     let deck_badge = if has_deck {
-        container(text("Deck Ready").size(12).color(colors.sage))
+        let label = if loaded_card_count > 0 {
+            format!("Deck Ready ({loaded_card_count} learned)")
+        } else {
+            "Deck Ready".to_string()
+        };
+        container(text(label).size(12).color(colors.sage))
             .padding([4, 10])
             .style(theme::badge_style(colors.sage_soft, colors.sage))
     } else {

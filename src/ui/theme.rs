@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use iced::overlay::menu;
 use iced::theme::Palette;
-use iced::widget::{button, container};
+use iced::widget::{button, container, pick_list, text_input};
 use iced::{Border, Color, Shadow, Theme, Vector, color};
 
 use crate::models::{ErrorSeverity, ResolvedTheme};
@@ -379,6 +380,81 @@ pub fn badge_style(bg: Color, border: Color) -> impl Fn(&Theme) -> container::St
     }
 }
 
+/// Adaptive warm Light/Dark style for text inputs in setup and settings forms.
+pub fn text_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let colors = tokens_for_theme(theme);
+    let (background, border_color) = match status {
+        text_input::Status::Active => (colors.card_surface, colors.border),
+        text_input::Status::Hovered => (colors.card_surface, colors.text_muted),
+        text_input::Status::Focused { .. } => (colors.card_surface, colors.coral),
+        text_input::Status::Disabled => (colors.card_muted, colors.border),
+    };
+
+    text_input::Style {
+        background: background.into(),
+        border: Border {
+            color: border_color,
+            width: if matches!(status, text_input::Status::Focused { .. }) {
+                1.5
+            } else {
+                1.0
+            },
+            radius: 10.0.into(),
+        },
+        icon: colors.text_muted,
+        placeholder: colors.text_muted,
+        value: colors.text_primary,
+        selection: colors.coral_soft,
+    }
+}
+
+/// Adaptive warm Light/Dark style for dropdown pick-list controls.
+pub fn pick_list_style(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let colors = tokens_for_theme(theme);
+    let (background, border_color, handle_color) = match status {
+        pick_list::Status::Active => (colors.card_surface, colors.border, colors.text_muted),
+        pick_list::Status::Hovered => (colors.card_muted, colors.text_muted, colors.text_primary),
+        pick_list::Status::Opened { .. } => (colors.card_surface, colors.coral, colors.coral_text),
+    };
+
+    pick_list::Style {
+        text_color: colors.text_primary,
+        placeholder_color: colors.text_muted,
+        handle_color,
+        background: background.into(),
+        border: Border {
+            color: border_color,
+            width: if matches!(status, pick_list::Status::Opened { .. }) {
+                1.5
+            } else {
+                1.0
+            },
+            radius: 10.0.into(),
+        },
+    }
+}
+
+/// Adaptive warm Light/Dark style for dropdown menu overlays.
+pub fn pick_list_menu_style(theme: &Theme) -> menu::Style {
+    let colors = tokens_for_theme(theme);
+    menu::Style {
+        background: colors.card_surface.into(),
+        border: Border {
+            color: colors.border,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        text_color: colors.text_primary,
+        selected_text_color: colors.coral_text,
+        selected_background: colors.coral_soft.into(),
+        shadow: Shadow {
+            color: colors.shadow_color,
+            offset: Vector::new(0.0, 4.0),
+            blur_radius: 12.0,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +508,18 @@ mod tests {
 
             let selected_pill = pill_button_style(true)(&theme, button::Status::Active);
             assert_eq!(selected_pill.border.color, colors.coral);
+
+            let focused_input = text_input_style(&theme, text_input::Status::Focused { is_hovered: false });
+            assert_eq!(focused_input.border.color, colors.coral);
+            assert_eq!(focused_input.value, colors.text_primary);
+
+            let opened_pick = pick_list_style(&theme, pick_list::Status::Opened { is_hovered: false });
+            assert_eq!(opened_pick.border.color, colors.coral);
+            assert_eq!(opened_pick.handle_color, colors.coral_text);
+
+            let menu_appearance = pick_list_menu_style(&theme);
+            assert_eq!(menu_appearance.selected_text_color, colors.coral_text);
+            assert_eq!(menu_appearance.background, colors.card_surface.into());
         }
     }
 }

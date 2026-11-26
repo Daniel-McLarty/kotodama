@@ -406,7 +406,6 @@ pub fn load_local_learned_notes(
 }
 
 /// Imports graduated (`queue = 2`) [`AnkiCard`] items from a local `collection.anki2` file.
-#[allow(dead_code)]
 pub fn import_local_learned_cards(
     collection_path: &Path,
     deck_name: &str,
@@ -421,7 +420,6 @@ pub fn import_local_learned_cards(
 }
 
 /// Inspects a running AnkiConnect HTTP endpoint and discovers decks and media folder location.
-#[allow(dead_code)]
 pub fn inspect_ankiconnect(endpoint_url: &str) -> Result<(AnkiCollectionSummary, Option<PathBuf>)> {
     let normalized_url = normalize_endpoint_url(endpoint_url)?;
     let agent = build_ankiconnect_agent();
@@ -519,7 +517,6 @@ pub fn load_ankiconnect_learned_notes(
 }
 
 /// Imports graduated (`queue = 2`) [`AnkiCard`] items from AnkiConnect.
-#[allow(dead_code)]
 pub fn import_ankiconnect_learned_cards(
     endpoint_url: &str,
     deck_name: &str,
@@ -534,7 +531,6 @@ pub fn import_ankiconnect_learned_cards(
 }
 
 /// Inspects either a local SQLite collection or an AnkiConnect server.
-#[allow(dead_code)]
 pub fn inspect_collection(source: &DeckSource) -> Result<(AnkiCollectionSummary, Option<PathBuf>)> {
     match source {
         DeckSource::LocalCollection {
@@ -549,7 +545,6 @@ pub fn inspect_collection(source: &DeckSource) -> Result<(AnkiCollectionSummary,
 }
 
 /// Loads graduated (`queue = 2`) raw notes for `deck_name` from the configured [`DeckSource`].
-#[allow(dead_code)]
 pub fn load_learned_notes(
     source: &DeckSource,
     deck_name: &str,
@@ -566,18 +561,19 @@ pub fn load_learned_notes(
 }
 
 /// Imports all graduated (`queue = 2`) [`AnkiCard`] items from the configured [`DeckSource`].
-#[allow(dead_code)]
 pub fn import_learned_cards(
     source: &DeckSource,
     deck_name: &str,
     mapping: &FieldMapping,
 ) -> Result<Vec<AnkiCard>> {
-    mapping.validate()?;
-    let notes = load_learned_notes(source, deck_name, None)?;
-    Ok(notes
-        .iter()
-        .map(|note| build_anki_card(note, mapping))
-        .collect())
+    match source {
+        DeckSource::LocalCollection {
+            collection_path, ..
+        } => import_local_learned_cards(collection_path, deck_name, mapping),
+        DeckSource::AnkiConnect { endpoint_url } => {
+            import_ankiconnect_learned_cards(endpoint_url, deck_name, mapping)
+        }
+    }
 }
 
 fn open_temp_collection(collection_path: &Path) -> Result<(TempDir, Connection)> {
@@ -876,7 +872,6 @@ fn post_ankiconnect<P: Serialize, T: DeserializeOwned>(
         .with_context(|| format!("AnkiConnect '{action}' response did not include a result"))
 }
 
-#[allow(dead_code)]
 fn fetch_ankiconnect_note_types(
     agent: &ureq::Agent,
     endpoint_url: &str,
