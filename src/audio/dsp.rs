@@ -70,7 +70,7 @@ pub fn extract_f0_contour(
         let mut tau = min_tau;
         while tau <= max_tau {
             if cmndf[tau] < config.yin_threshold {
-                while tau + 1 <= max_tau && cmndf[tau + 1] < cmndf[tau] {
+                while tau < max_tau && cmndf[tau + 1] < cmndf[tau] {
                     tau += 1;
                 }
                 selected_tau = Some(tau);
@@ -199,9 +199,9 @@ pub fn dtw_pitch_distance(reference: &[Option<f32>], user: &[Option<f32>]) -> Re
         steps[j] = steps[j - 1] + 1;
     }
 
-    for i in 1..n {
-        for j in 1..m {
-            let local = (ref_voiced[i] - user_voiced[j]).abs();
+    for (i, &r_val) in ref_voiced.iter().enumerate().skip(1) {
+        for (j, &u_val) in user_voiced.iter().enumerate().skip(1) {
+            let local = (r_val - u_val).abs();
             let diag_idx = (i - 1) * m + (j - 1);
             let up_idx = (i - 1) * m + j;
             let left_idx = i * m + (j - 1);

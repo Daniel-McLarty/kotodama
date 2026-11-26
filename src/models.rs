@@ -591,6 +591,7 @@ impl PitchAnalysis {
     }
 
     /// Returns pitch accuracy percentage (`100.0 - pitch_error_percent`).
+    #[allow(dead_code)]
     pub fn accuracy_percent(&self) -> f32 {
         (100.0 - self.pitch_error_percent).clamp(0.0, 100.0)
     }

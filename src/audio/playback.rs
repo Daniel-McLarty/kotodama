@@ -364,6 +364,7 @@ pub fn play_audio_file_at_speed(path: &Path, speed: PlaybackSpeed) -> Result<()>
 }
 
 /// Decodes and plays an audio clip at normal (`1.0x`) speed on a persistent system output sink.
+#[allow(dead_code)]
 pub fn play_audio_file(path: &Path) -> Result<()> {
     play_audio_file_at_speed(path, PlaybackSpeed::Normal)
 }
