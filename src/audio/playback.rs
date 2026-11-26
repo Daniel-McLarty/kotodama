@@ -3,10 +3,13 @@
 use std::fs::File;
 use std::num::NonZero;
 use std::path::Path;
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
 
 use anyhow::{Context, Result, bail};
 use rodio::buffer::SamplesBuffer;
-use rodio::{DeviceSinkBuilder, Player};
+use rodio::{ChannelCount, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate};
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
@@ -112,23 +115,90 @@ pub fn decode_audio_file(path: &Path) -> Result<DecodedAudio> {
     })
 }
 
-/// Decodes and plays an audio clip on the default system output device until completion.
-pub fn play_audio_file(path: &Path) -> Result<()> {
-    let decoded = decode_audio_file(path)?;
+struct PlaybackJob {
+    decoded: DecodedAudio,
+    reply_tx: Sender<Result<()>>,
+}
 
-    let sample_rate = NonZero::new(decoded.sample_rate)
-        .context("Decoded audio reported an invalid 0 Hz sample rate")?;
+static PLAYBACK_WORKER: OnceLock<Mutex<Sender<PlaybackJob>>> = OnceLock::new();
+
+fn validate_playback_params(decoded: &DecodedAudio) -> Result<(ChannelCount, SampleRate)> {
     let channels = NonZero::new(decoded.channels)
         .context("Decoded audio reported an invalid 0 channel count")?;
+    let sample_rate = NonZero::new(decoded.sample_rate)
+        .context("Decoded audio reported an invalid 0 Hz sample rate")?;
+    Ok((channels, sample_rate))
+}
 
-    let stream_handle = DeviceSinkBuilder::open_default_sink()
-        .context("No audio output device is available for playback")?;
-    let player = Player::connect_new(stream_handle.mixer());
+fn playback_worker_sender() -> Result<&'static Mutex<Sender<PlaybackJob>>> {
+    if let Some(sender) = PLAYBACK_WORKER.get() {
+        return Ok(sender);
+    }
+
+    let (tx, rx) = mpsc::channel::<PlaybackJob>();
+    thread::Builder::new()
+        .name("kotodama-audio-playback".to_string())
+        .spawn(move || {
+            let mut device_sink: Option<MixerDeviceSink> = None;
+
+            while let Ok(job) = rx.recv() {
+                let result = play_on_persistent_sink(&mut device_sink, job.decoded);
+                let _ = job.reply_tx.send(result);
+            }
+        })
+        .context("Failed to spawn audio playback worker thread")?;
+
+    let _ = PLAYBACK_WORKER.set(Mutex::new(tx));
+    PLAYBACK_WORKER
+        .get()
+        .context("Audio playback worker failed to initialize")
+}
+
+fn play_on_persistent_sink(
+    device_sink: &mut Option<MixerDeviceSink>,
+    decoded: DecodedAudio,
+) -> Result<()> {
+    let (channels, sample_rate) = validate_playback_params(&decoded)?;
+
+    if device_sink.is_none() {
+        let mut opened = DeviceSinkBuilder::open_default_sink()
+            .context("No audio output device is available for playback")?;
+        opened.log_on_drop(false);
+        *device_sink = Some(opened);
+    }
+
+    let Some(sink) = device_sink.as_ref() else {
+        bail!("Audio output device could not be initialized");
+    };
+
+    let player = Player::connect_new(sink.mixer());
     let buffer = SamplesBuffer::new(channels, sample_rate, decoded.samples);
-
     player.append(buffer);
     player.sleep_until_end();
     Ok(())
+}
+
+/// Decodes and plays an audio clip on a persistent system output sink until completion.
+pub fn play_audio_file(path: &Path) -> Result<()> {
+    let decoded = decode_audio_file(path)?;
+    let _ = validate_playback_params(&decoded)?;
+
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let job = PlaybackJob { decoded, reply_tx };
+
+    {
+        let sender_lock = playback_worker_sender()?;
+        let sender = sender_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Audio playback worker mutex was poisoned"))?;
+        sender
+            .send(job)
+            .map_err(|_| anyhow::anyhow!("Audio playback worker stopped unexpectedly"))?;
+    }
+
+    reply_rx
+        .recv()
+        .context("Audio playback worker disconnected before finishing playback")?
 }
 
 #[cfg(test)]
@@ -195,6 +265,33 @@ mod tests {
         let corrupt = dir.path().join("corrupt.mp3");
         fs::write(&corrupt, b"definitely not valid audio bytes")?;
         assert!(decode_audio_file(&corrupt).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn validate_playback_params_rejects_zero_rate_or_channels() -> Result<()> {
+        let valid = DecodedAudio {
+            samples: vec![0.0; 16],
+            sample_rate: 16_000,
+            channels: 1,
+        };
+        let (ch, sr) = validate_playback_params(&valid)?;
+        assert_eq!(ch.get(), 1);
+        assert_eq!(sr.get(), 16_000);
+
+        let zero_rate = DecodedAudio {
+            samples: vec![0.0; 16],
+            sample_rate: 0,
+            channels: 1,
+        };
+        assert!(validate_playback_params(&zero_rate).is_err());
+
+        let zero_channels = DecodedAudio {
+            samples: vec![0.0; 16],
+            sample_rate: 16_000,
+            channels: 0,
+        };
+        assert!(validate_playback_params(&zero_channels).is_err());
         Ok(())
     }
 }
