@@ -12,7 +12,8 @@ pub fn view<'a>(
     active_mode: PracticeMode,
     settings: &'a AppSettings,
     streak: &'a DailyStreak,
-    loaded_card_count: usize,
+    active_card_count: usize,
+    excluded_card_count: usize,
     has_deck: bool,
     resolved_theme: ResolvedTheme,
 ) -> Element<'a, Message> {
@@ -32,8 +33,8 @@ pub fn view<'a>(
     );
 
     let deck_badge = if has_deck {
-        let label = if loaded_card_count > 0 {
-            format!("Deck Ready ({loaded_card_count} learned)")
+        let label = if active_card_count > 0 || excluded_card_count > 0 {
+            format!("Deck Ready ({active_card_count} active)")
         } else {
             "Deck Ready".to_string()
         };
@@ -52,7 +53,7 @@ pub fn view<'a>(
         "Blind Mode: Off"
     };
 
-    let status_badges = row![
+    let mut status_badges = row![
         deck_badge,
         container(
             text(settings.playback_speed.label())
@@ -67,6 +68,18 @@ pub fn view<'a>(
     ]
     .spacing(8)
     .align_y(Alignment::Center);
+
+    if excluded_card_count > 0 {
+        status_badges = status_badges.push(
+            container(
+                text(format!("{excluded_card_count} excluded"))
+                    .size(12)
+                    .color(colors.text_muted),
+            )
+            .padding([4, 10])
+            .style(theme::badge_style(colors.card_muted, colors.border)),
+        );
+    }
 
     let mode_card = container(
         column![

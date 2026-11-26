@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
@@ -238,13 +238,125 @@ impl DeckAudioReport {
     }
 }
 
-/// Persisted deck workspace containing the active deck and saved per-deck field mappings.
+/// Persisted deck workspace containing the active deck, field mappings, and card exclusions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeckWorkspaceConfig {
     /// Most recently configured active Anki deck.
     pub active_deck: Option<DeckConfig>,
     /// Per-deck saved field mappings keyed by deck name.
     pub saved_mappings: BTreeMap<String, FieldMapping>,
+    /// Per-deck sets of Anki card IDs permanently excluded from Kotodama practice.
+    #[serde(default)]
+    pub excluded_card_ids: BTreeMap<String, BTreeSet<i64>>,
+    /// Cached display labels for excluded Anki cards keyed by card ID.
+    #[serde(default)]
+    pub excluded_card_labels: BTreeMap<i64, String>,
+}
+
+impl DeckWorkspaceConfig {
+    /// Returns `true` when `card_id` is excluded from practice in `deck_name`.
+    pub fn is_card_excluded(&self, deck_name: &str, card_id: i64) -> bool {
+        self.excluded_card_ids
+            .get(deck_name)
+            .is_some_and(|ids| ids.contains(&card_id))
+    }
+
+    /// Returns the count of excluded cards recorded for `deck_name`.
+    pub fn excluded_count_for_deck(&self, deck_name: &str) -> usize {
+        self.excluded_card_ids
+            .get(deck_name)
+            .map_or(0, BTreeSet::len)
+    }
+
+    /// Excludes `card_id` from `deck_name` with an optional display label, returning `true` if newly added.
+    pub fn exclude_card(&mut self, deck_name: &str, card_id: i64, label: Option<String>) -> bool {
+        if let Some(text) = label
+            && !text.trim().is_empty()
+        {
+            self.excluded_card_labels.insert(card_id, text);
+        }
+        self.excluded_card_ids
+            .entry(deck_name.to_string())
+            .or_default()
+            .insert(card_id)
+    }
+
+    /// Restores a previously excluded `card_id` back into `deck_name`, returning `true` if it was excluded.
+    pub fn restore_card(&mut self, deck_name: &str, card_id: i64) -> bool {
+        let Some(ids) = self.excluded_card_ids.get_mut(deck_name) else {
+            return false;
+        };
+        let removed = ids.remove(&card_id);
+        if ids.is_empty() {
+            self.excluded_card_ids.remove(deck_name);
+        }
+        if removed && !self.is_card_excluded_anywhere(card_id) {
+            self.excluded_card_labels.remove(&card_id);
+        }
+        removed
+    }
+
+    /// Restores all excluded cards for `deck_name`, returning how many cards were restored.
+    pub fn restore_all_for_deck(&mut self, deck_name: &str) -> usize {
+        let Some(removed_ids) = self.excluded_card_ids.remove(deck_name) else {
+            return 0;
+        };
+        let count = removed_ids.len();
+        for card_id in removed_ids {
+            if !self.is_card_excluded_anywhere(card_id) {
+                self.excluded_card_labels.remove(&card_id);
+            }
+        }
+        count
+    }
+
+    /// Excludes every card in `cards` that carries audio quality warnings, returning how many were newly excluded.
+    pub fn exclude_invalid_audio_cards(&mut self, deck_name: &str, cards: &[AnkiCard]) -> usize {
+        let mut added = 0_usize;
+        for card in cards {
+            if card.has_audio_warnings()
+                && self.exclude_card(deck_name, card.card_id, Some(card.display_label()))
+            {
+                added = added.saturating_add(1);
+            }
+        }
+        added
+    }
+
+    /// Filters `cards` to exclude any card IDs listed as excluded for `deck_name`.
+    pub fn filter_active_cards<'a>(&self, deck_name: &str, cards: &'a [AnkiCard]) -> Vec<&'a AnkiCard> {
+        let Some(excluded) = self.excluded_card_ids.get(deck_name) else {
+            return cards.iter().collect();
+        };
+        cards
+            .iter()
+            .filter(|card| !excluded.contains(&card.card_id))
+            .collect()
+    }
+
+    /// Returns sorted `(card_id, display_label)` entries for all excluded cards in `deck_name`.
+    pub fn excluded_entries_for_deck(&self, deck_name: &str) -> Vec<(i64, String)> {
+        let Some(excluded) = self.excluded_card_ids.get(deck_name) else {
+            return Vec::new();
+        };
+        excluded
+            .iter()
+            .map(|&card_id| {
+                let label = self
+                    .excluded_card_labels
+                    .get(&card_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Card #{card_id}"));
+                (card_id, label)
+            })
+            .collect()
+    }
+
+    fn is_card_excluded_anywhere(&self, card_id: i64) -> bool {
+        self.excluded_card_ids
+            .values()
+            .any(|ids| ids.contains(&card_id))
+    }
 }
 
 /// Decoded interleaved PCM audio buffer normalized to `[-1.0, 1.0]`.
@@ -355,6 +467,18 @@ impl AnkiCard {
     /// Returns `true` when one or more reference audio quality issues were flagged.
     pub fn has_audio_warnings(&self) -> bool {
         !self.audio_issues.is_empty()
+    }
+
+    /// Formats a concise human-readable label for preview badges and exclusion lists.
+    pub fn display_label(&self) -> String {
+        let word = self.word.trim();
+        let kana = self.kana.trim();
+        match (word.is_empty(), kana.is_empty()) {
+            (false, false) if word != kana => format!("{word} ({kana})"),
+            (false, _) => word.to_string(),
+            (true, false) => kana.to_string(),
+            (true, true) => format!("Card #{}", self.card_id),
+        }
     }
 }
 
@@ -1388,11 +1512,83 @@ mod tests {
         let workspace = DeckWorkspaceConfig {
             active_deck: Some(config),
             saved_mappings,
+            excluded_card_ids: BTreeMap::from([(
+                "Core 2k".to_string(),
+                BTreeSet::from([101_i64, 202_i64]),
+            )]),
+            excluded_card_labels: BTreeMap::from([
+                (101_i64, "靴 (くつ)".to_string()),
+                (202_i64, "橋 (はし)".to_string()),
+            ]),
         };
 
         let encoded = serde_json::to_string(&workspace)?;
         let decoded: DeckWorkspaceConfig = serde_json::from_str(&encoded)?;
         assert_eq!(workspace, decoded);
+        Ok(())
+    }
+
+    #[test]
+    fn deck_workspace_exclusions_filter_active_queue_and_migrate_legacy_json() -> Result<()> {
+        let legacy_json = r#"{
+            "active_deck": null,
+            "saved_mappings": {}
+        }"#;
+        let mut workspace: DeckWorkspaceConfig = serde_json::from_str(legacy_json)?;
+        assert!(workspace.excluded_card_ids.is_empty());
+
+        let clean_card = AnkiCard {
+            card_id: 1,
+            note_id: 10,
+            deck_name: "Core 2k".to_string(),
+            word: "水".to_string(),
+            kana: "みず".to_string(),
+            sentence: None,
+            word_audio: "mizu.mp3".to_string(),
+            sentence_audio: None,
+            anki_queue: AnkiCard::LEARNED_QUEUE,
+            audio_issues: Vec::new(),
+            last_pitch_error_percent: None,
+        };
+        let bad_card = AnkiCard {
+            card_id: 2,
+            note_id: 20,
+            deck_name: "Core 2k".to_string(),
+            word: "靴".to_string(),
+            kana: "くつ".to_string(),
+            sentence: None,
+            word_audio: "missing.mp3".to_string(),
+            sentence_audio: None,
+            anki_queue: AnkiCard::LEARNED_QUEUE,
+            audio_issues: vec![AudioQualityIssue::MissingFile],
+            last_pitch_error_percent: None,
+        };
+        let cards = vec![clean_card.clone(), bad_card.clone()];
+
+        assert_eq!(workspace.filter_active_cards("Core 2k", &cards).len(), 2);
+        assert_eq!(
+            workspace.exclude_invalid_audio_cards("Core 2k", &cards),
+            1
+        );
+        assert!(workspace.is_card_excluded("Core 2k", 2));
+        assert!(!workspace.is_card_excluded("Core 2k", 1));
+        assert_eq!(workspace.excluded_count_for_deck("Core 2k"), 1);
+        assert_eq!(
+            workspace.excluded_entries_for_deck("Core 2k"),
+            vec![(2, "靴 (くつ)".to_string())]
+        );
+
+        let active = workspace.filter_active_cards("Core 2k", &cards);
+        assert_eq!(active, vec![&clean_card]);
+
+        assert!(workspace.restore_card("Core 2k", 2));
+        assert!(!workspace.is_card_excluded("Core 2k", 2));
+        assert_eq!(workspace.excluded_count_for_deck("Core 2k"), 0);
+        assert_eq!(workspace.filter_active_cards("Core 2k", &cards).len(), 2);
+
+        assert!(workspace.exclude_card("Core 2k", 1, Some(clean_card.display_label())));
+        assert_eq!(workspace.restore_all_for_deck("Core 2k"), 1);
+        assert_eq!(workspace.excluded_count_for_deck("Core 2k"), 0);
         Ok(())
     }
 }

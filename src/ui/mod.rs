@@ -9,7 +9,6 @@ pub mod setup;
 /// Warm, playful Light and Dark palettes and Iced widget style helpers.
 pub mod theme;
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::Error;
@@ -22,7 +21,7 @@ use crate::anki::{reader, validator};
 use crate::audio::playback;
 use crate::models::{
     AnkiCard, AnkiCollectionSummary, AnkiRawNote, AppErrorToast, AppSettings, DailyGoal,
-    DailyStreak, DeckAudioReport, DeckConfig, DeckWorkspaceConfig, FieldMapping, NavTab,
+    DailyStreak, DeckAudioReport, DeckConfig, DeckWorkspaceConfig, NavTab,
     PlaybackSpeed, PracticeMode, ResolvedTheme, ThemePreference,
 };
 use crate::storage;
@@ -97,10 +96,25 @@ pub enum Message {
     },
     /// Receives the completion result of playing a sample preview audio clip.
     AudioPlaybackFinished(Result<(), String>),
-    /// Imports all graduated cards for the mapped deck, validates audio, and saves config.
+    /// Validates and imports all graduated cards for the mapped deck, then saves config.
     ValidateAndSaveDeck,
     /// Receives the validated deck config, learned cards, and GIGO audio report.
     DeckImportCompleted(Result<(DeckConfig, Vec<AnkiCard>, DeckAudioReport), String>),
+    /// Excludes the currently previewed card from Kotodama practice queues.
+    ExcludePreviewCard,
+    /// Restores a previously excluded card back into active practice for `deck_name`.
+    RestoreCard {
+        /// Deck containing the excluded card.
+        deck_name: String,
+        /// Anki card ID to restore.
+        card_id: i64,
+    },
+    /// Excludes all cards with flagged audio quality warnings for the active deck.
+    AutoExcludeInvalidAudioCards,
+    /// Restores all excluded cards for the given deck name.
+    RestoreAllExcludedCards(String),
+    /// Toggles visibility of the excluded-cards list in Setup.
+    ToggleExcludedCardsList,
     /// Simulates a recoverable feature/setup error surfaced as a dismissible toast.
     TriggerRecoverableAction,
     /// Triggers a sample recoverable error toast from Settings for testing UX.
@@ -115,8 +129,7 @@ pub enum Message {
 pub struct KotodamaApp {
     active_tab: NavTab,
     active_mode: PracticeMode,
-    deck_config: Option<DeckConfig>,
-    saved_mappings: BTreeMap<String, FieldMapping>,
+    deck_workspace: DeckWorkspaceConfig,
     loaded_cards: Vec<AnkiCard>,
     setup_state: SetupState,
     streak: DailyStreak,
@@ -138,8 +151,7 @@ impl Default for KotodamaApp {
         Self {
             active_tab: NavTab::Setup,
             active_mode: PracticeMode::CombinedShadowing,
-            deck_config: None,
-            saved_mappings: BTreeMap::new(),
+            deck_workspace: DeckWorkspaceConfig::default(),
             loaded_cards: Vec::new(),
             setup_state: SetupState::default(),
             streak,
@@ -189,8 +201,7 @@ impl KotodamaApp {
                 match storage::load_deck_workspace(&path) {
                     Ok(workspace) => {
                         app.setup_state.apply_workspace(&workspace);
-                        app.deck_config = workspace.active_deck;
-                        app.saved_mappings = workspace.saved_mappings;
+                        app.deck_workspace = workspace;
                     }
                     Err(err) => {
                         app.report_warning(
@@ -448,7 +459,8 @@ impl KotodamaApp {
                 match result {
                     Ok(notes) => {
                         let no_notes = notes.is_empty();
-                        self.setup_state.set_sample_notes(notes, &self.saved_mappings);
+                        self.setup_state
+                            .set_sample_notes(notes, &self.deck_workspace.saved_mappings);
                         if no_notes && let Some(deck) = &self.setup_state.selected_deck_name {
                             self.report_warning(
                                 "No Learned Cards Found",
@@ -523,9 +535,10 @@ impl KotodamaApp {
 
                 match result {
                     Ok((config, cards, report)) => {
-                        self.saved_mappings
+                        self.deck_workspace
+                            .saved_mappings
                             .insert(config.deck_name.clone(), config.field_mapping.clone());
-                        self.deck_config = Some(config);
+                        self.deck_workspace.active_deck = Some(config);
                         self.loaded_cards = cards;
                         self.setup_state.audio_report = Some(report.clone());
                         self.persist_deck_workspace();
@@ -534,7 +547,7 @@ impl KotodamaApp {
                             self.report_warning(
                                 "Audio Quality Warnings Detected",
                                 report.summary_line(),
-                                Some("Review the Setup preview or replace flagged clips in Anki for best grading accuracy.".to_string()),
+                                Some("Use Auto-Exclude Invalid Audio Cards in Setup or replace flagged clips in Anki.".to_string()),
                             );
                         }
                     }
@@ -548,8 +561,57 @@ impl KotodamaApp {
                     }
                 }
             }
+            Message::ExcludePreviewCard => {
+                let Some(deck_name) = self.active_or_selected_deck_name().map(str::to_string) else {
+                    return Task::none();
+                };
+                let Some(card) = self.setup_state.current_preview_card() else {
+                    return Task::none();
+                };
+                if self.deck_workspace.exclude_card(
+                    &deck_name,
+                    card.card_id,
+                    Some(card.display_label()),
+                ) {
+                    self.persist_deck_workspace();
+                }
+            }
+            Message::RestoreCard { deck_name, card_id } => {
+                if self.deck_workspace.restore_card(&deck_name, card_id) {
+                    if self.deck_workspace.excluded_count_for_deck(&deck_name) == 0 {
+                        self.setup_state.show_excluded_list = false;
+                    }
+                    self.persist_deck_workspace();
+                }
+            }
+            Message::AutoExcludeInvalidAudioCards => {
+                let Some(deck_name) = self.active_or_selected_deck_name().map(str::to_string) else {
+                    return Task::none();
+                };
+                let added = self
+                    .deck_workspace
+                    .exclude_invalid_audio_cards(&deck_name, &self.loaded_cards);
+                if added > 0 {
+                    self.persist_deck_workspace();
+                } else {
+                    self.report_warning(
+                        "No New Invalid Cards",
+                        "All flagged cards for this deck are already excluded or no invalid clips were found.",
+                        None,
+                    );
+                }
+            }
+            Message::RestoreAllExcludedCards(deck_name) => {
+                if self.deck_workspace.restore_all_for_deck(&deck_name) > 0 {
+                    self.setup_state.show_excluded_list = false;
+                    self.persist_deck_workspace();
+                }
+            }
+            Message::ToggleExcludedCardsList => {
+                self.setup_state.show_excluded_list = !self.setup_state.show_excluded_list;
+            }
             Message::TriggerRecoverableAction => {
-                let message = if self.deck_config.is_some() {
+                let message = if self.deck_workspace.active_deck.is_some() {
                     "Audio recording, pitch DSP, and analytics export are scheduled for Phases 3–6."
                 } else {
                     "Connect and validate an Anki deck in Setup first, then check back as Phases 3–6 land."
@@ -591,16 +653,17 @@ impl KotodamaApp {
         let active_content = match self.active_tab {
             NavTab::Setup => setup::view(
                 &self.setup_state,
-                self.deck_config.as_ref(),
-                self.loaded_cards.len(),
+                &self.deck_workspace,
+                &self.loaded_cards,
                 resolved_theme,
             ),
             NavTab::Practice => practice::view(
                 self.active_mode,
                 &self.settings,
                 &self.streak,
-                self.loaded_cards.len(),
-                self.deck_config.is_some(),
+                self.active_practice_cards().len(),
+                self.excluded_count_for_active_deck(),
+                self.deck_workspace.active_deck.is_some(),
                 resolved_theme,
             ),
             NavTab::Dashboard => dashboard::view(&self.streak, resolved_theme),
@@ -662,9 +725,36 @@ impl KotodamaApp {
         self.setup_state.refresh_preview_audio_issues();
     }
 
+    /// Returns the active practice queue for the current deck with excluded cards filtered out.
+    pub fn active_practice_cards(&self) -> Vec<&AnkiCard> {
+        let Some(deck_name) = self.active_or_selected_deck_name() else {
+            return Vec::new();
+        };
+        self.deck_workspace
+            .filter_active_cards(deck_name, &self.loaded_cards)
+    }
+
+    fn active_or_selected_deck_name(&self) -> Option<&str> {
+        self.setup_state
+            .selected_deck_name
+            .as_deref()
+            .or_else(|| {
+                self.deck_workspace
+                    .active_deck
+                    .as_ref()
+                    .map(|deck| deck.deck_name.as_str())
+            })
+    }
+
+    fn excluded_count_for_active_deck(&self) -> usize {
+        self.active_or_selected_deck_name()
+            .map_or(0, |name| self.deck_workspace.excluded_count_for_deck(name))
+    }
+
     fn sync_active_mapping_changes(&mut self) {
         if let Some(deck_name) = &self.setup_state.selected_deck_name {
-            self.saved_mappings
+            self.deck_workspace
+                .saved_mappings
                 .insert(deck_name.clone(), self.setup_state.draft_mapping.clone());
         }
         self.setup_state.refresh_preview_audio_issues();
@@ -824,12 +914,7 @@ impl KotodamaApp {
             return;
         };
 
-        let workspace = DeckWorkspaceConfig {
-            active_deck: self.deck_config.clone(),
-            saved_mappings: self.saved_mappings.clone(),
-        };
-
-        if let Err(err) = storage::save_deck_workspace(path, &workspace) {
+        if let Err(err) = storage::save_deck_workspace(path, &self.deck_workspace) {
             self.report_error(
                 "Could Not Save Deck Configuration",
                 &err,
@@ -1051,7 +1136,64 @@ impl KotodamaApp {
         .padding(20)
         .style(theme::card_style);
 
-        column![appearance_card, ergonomics_card, fsrs_card]
+        let exclusions_card = if let Some(deck_name) = self.active_or_selected_deck_name() {
+            let entries = self.deck_workspace.excluded_entries_for_deck(deck_name);
+            let count = entries.len();
+            let mut body = column![
+                row![
+                    text("Excluded Cards").size(18).color(colors.text_primary),
+                    space().width(Length::Fill),
+                    container(
+                        text(format!("{count} excluded"))
+                            .size(12)
+                            .color(colors.text_muted),
+                    )
+                    .padding([4, 10])
+                    .style(theme::badge_style(colors.card_muted, colors.border)),
+                ]
+                .align_y(Alignment::Center),
+                text(format!(
+                    "Cards skipped from Kotodama practice in '{deck_name}' without modifying Anki."
+                ))
+                .size(14)
+                .color(colors.text_muted),
+            ]
+            .spacing(12);
+
+            if !entries.is_empty() {
+                body = body.push(
+                    button(text("Restore All Excluded").size(13))
+                        .padding([8, 14])
+                        .style(theme::secondary_button_style)
+                        .on_press(Message::RestoreAllExcludedCards(deck_name.to_string())),
+                );
+                body = body.push(setup::render_excluded_entries_list(
+                    deck_name,
+                    &entries,
+                    colors,
+                ));
+            }
+
+            container(body)
+                .width(Length::Fill)
+                .padding(20)
+                .style(theme::card_style)
+        } else {
+            container(
+                column![
+                    text("Excluded Cards").size(18).color(colors.text_primary),
+                    text("Connect a deck in Setup to manage cards excluded from pronunciation practice.")
+                        .size(14)
+                        .color(colors.text_muted),
+                ]
+                .spacing(8),
+            )
+            .width(Length::Fill)
+            .padding(20)
+            .style(theme::card_style)
+        };
+
+        column![appearance_card, ergonomics_card, exclusions_card, fsrs_card]
             .spacing(18)
             .width(Length::Fill)
             .into()
@@ -1133,11 +1275,12 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
-    use crate::models::{AnkiDeckSummary, AnkiNoteType, DeckSource, ErrorSeverity};
+    use crate::models::{AnkiDeckSummary, AnkiNoteType, DeckSource, ErrorSeverity, FieldMapping};
 
     static UI_TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -1377,14 +1520,126 @@ mod tests {
             report,
         ))));
 
-        assert_eq!(app.deck_config.as_ref(), Some(&config));
+        assert_eq!(app.deck_workspace.active_deck.as_ref(), Some(&config));
         assert_eq!(app.loaded_cards.len(), 1);
+        assert_eq!(app.active_practice_cards().len(), 1);
         assert_eq!(app.toasts.len(), 1);
         assert_eq!(app.toasts[0].severity, ErrorSeverity::Warning);
 
         let persisted = storage::load_deck_workspace(&deck_path)?;
         assert_eq!(persisted.active_deck, Some(config));
         assert_eq!(persisted.saved_mappings.get("Core 2k"), Some(&mapping));
+
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn card_exclusions_filter_practice_queue_and_persist_across_reloads() -> anyhow::Result<()> {
+        let (dir, settings_path, deck_path) = temp_config_paths("card_exclusions");
+        let mut app = KotodamaApp::with_config_paths(settings_path, deck_path.clone());
+
+        let mapping = FieldMapping {
+            word_field: "Expression".to_string(),
+            kana_field: "Reading".to_string(),
+            sentence_field: None,
+            word_audio_field: "WordAudio".to_string(),
+            sentence_audio_field: None,
+        };
+        let config = DeckConfig {
+            deck_name: "Core 2k".to_string(),
+            source: DeckSource::AnkiConnect {
+                endpoint_url: "http://127.0.0.1:8765".to_string(),
+            },
+            field_mapping: mapping,
+            last_synced_at: Some(Utc::now()),
+            flagged_audio_count: 1,
+        };
+        let clean_card = AnkiCard {
+            card_id: 10,
+            note_id: 100,
+            deck_name: "Core 2k".to_string(),
+            word: "水".to_string(),
+            kana: "みず".to_string(),
+            sentence: None,
+            word_audio: "mizu.mp3".to_string(),
+            sentence_audio: None,
+            anki_queue: AnkiCard::LEARNED_QUEUE,
+            audio_issues: Vec::new(),
+            last_pitch_error_percent: None,
+        };
+        let bad_card = AnkiCard {
+            card_id: 11,
+            note_id: 101,
+            deck_name: "Core 2k".to_string(),
+            word: "橋".to_string(),
+            kana: "はし".to_string(),
+            sentence: None,
+            word_audio: "missing.mp3".to_string(),
+            sentence_audio: None,
+            anki_queue: AnkiCard::LEARNED_QUEUE,
+            audio_issues: vec![crate::models::AudioQualityIssue::MissingFile],
+            last_pitch_error_percent: None,
+        };
+        let report = DeckAudioReport {
+            total_cards: 2,
+            total_clips_checked: 2,
+            flagged_cards: 1,
+            missing_files: 1,
+            too_short_clips: 0,
+            clipped_clips: 0,
+            decode_failures: 0,
+        };
+
+        let _ = app.update(Message::DeckImportCompleted(Ok((
+            config,
+            vec![clean_card.clone(), bad_card],
+            report,
+        ))));
+        assert_eq!(app.active_practice_cards().len(), 2);
+
+        let _ = app.update(Message::AutoExcludeInvalidAudioCards);
+        assert_eq!(app.excluded_count_for_active_deck(), 1);
+        assert_eq!(app.active_practice_cards(), vec![&clean_card]);
+
+        let reloaded = storage::load_deck_workspace(&deck_path)?;
+        assert!(reloaded.is_card_excluded("Core 2k", 11));
+        assert_eq!(reloaded.filter_active_cards("Core 2k", &app.loaded_cards).len(), 1);
+
+        app.setup_state.selected_deck_name = Some("Core 2k".to_string());
+        app.setup_state.sample_notes = vec![AnkiRawNote {
+            card_id: 10,
+            note_id: 100,
+            deck_name: "Core 2k".to_string(),
+            note_type_id: 1,
+            anki_queue: AnkiCard::LEARNED_QUEUE,
+            fields: std::collections::BTreeMap::from([
+                ("Expression".to_string(), "水".to_string()),
+                ("Reading".to_string(), "みず".to_string()),
+                ("WordAudio".to_string(), "[sound:mizu.mp3]".to_string()),
+            ]),
+        }];
+        app.setup_state.draft_mapping = reloaded
+            .active_deck
+            .as_ref()
+            .expect("active deck should exist")
+            .field_mapping
+            .clone();
+
+        let _ = app.update(Message::ExcludePreviewCard);
+        assert_eq!(app.excluded_count_for_active_deck(), 2);
+        assert!(app.active_practice_cards().is_empty());
+
+        let _ = app.update(Message::RestoreCard {
+            deck_name: "Core 2k".to_string(),
+            card_id: 10,
+        });
+        assert_eq!(app.excluded_count_for_active_deck(), 1);
+        assert_eq!(app.active_practice_cards(), vec![&clean_card]);
+
+        let _ = app.update(Message::RestoreAllExcludedCards("Core 2k".to_string()));
+        assert_eq!(app.excluded_count_for_active_deck(), 0);
+        assert_eq!(app.active_practice_cards().len(), 2);
 
         let _ = fs::remove_dir_all(&dir);
         Ok(())

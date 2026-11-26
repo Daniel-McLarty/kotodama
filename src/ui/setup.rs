@@ -95,6 +95,8 @@ pub struct SetupState {
     pub busy_label: Option<String>,
     /// Whether a sample test audio clip is currently playing.
     pub is_playing_audio: bool,
+    /// Whether the expandable list of excluded cards is visible in Setup.
+    pub show_excluded_list: bool,
 }
 
 impl Default for SetupState {
@@ -121,6 +123,7 @@ impl Default for SetupState {
             is_busy: false,
             busy_label: None,
             is_playing_audio: false,
+            show_excluded_list: false,
         }
     }
 }
@@ -358,16 +361,35 @@ impl SetupState {
 /// Renders the interactive Anki deck setup, field mapper, GIGO notice, and live preview view.
 pub fn view<'a>(
     state: &'a SetupState,
-    deck_config: Option<&'a DeckConfig>,
-    loaded_card_count: usize,
+    workspace: &'a DeckWorkspaceConfig,
+    loaded_cards: &'a [AnkiCard],
     resolved_theme: ResolvedTheme,
 ) -> Element<'a, Message> {
     let colors = theme::tokens(resolved_theme);
+    let active_deck_name = state
+        .selected_deck_name
+        .as_deref()
+        .or_else(|| workspace.active_deck.as_ref().map(|deck| deck.deck_name.as_str()));
 
-    let gigo_banner = render_gigo_banner(state.audio_report.as_ref(), colors);
-    let source_card = render_source_card(state, deck_config, loaded_card_count, colors);
+    let active_card_count = active_deck_name
+        .map(|name| workspace.filter_active_cards(name, loaded_cards).len())
+        .unwrap_or(0);
+
+    let gigo_banner = render_gigo_banner(
+        state,
+        workspace,
+        loaded_cards,
+        active_deck_name,
+        colors,
+    );
+    let source_card = render_source_card(
+        state,
+        workspace.active_deck.as_ref(),
+        active_card_count,
+        colors,
+    );
     let mapper_card = render_field_mapper_card(state, colors);
-    let preview_card = render_preview_card(state, colors);
+    let preview_card = render_preview_card(state, workspace, active_deck_name, colors);
 
     column![gigo_banner, source_card, mapper_card, preview_card]
         .spacing(18)
@@ -375,8 +397,51 @@ pub fn view<'a>(
         .into()
 }
 
+/// Renders an interactive list of excluded cards with individual Restore buttons.
+pub(super) fn render_excluded_entries_list<'a>(
+    deck_name: &str,
+    entries: &[(i64, String)],
+    colors: &'static ThemeTokens,
+) -> Element<'a, Message> {
+    let rows = entries.iter().fold(column![].spacing(8), |col, (card_id, label)| {
+        let deck = deck_name.to_string();
+        let id = *card_id;
+        col.push(
+            container(
+                row![
+                    column![
+                        text(label.clone()).size(13).color(colors.text_primary),
+                        text(format!("Card ID: {id}"))
+                            .size(11)
+                            .color(colors.text_muted),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    button(text("Restore").size(12))
+                        .padding([6, 12])
+                        .style(theme::secondary_button_style)
+                        .on_press(Message::RestoreCard {
+                            deck_name: deck,
+                            card_id: id,
+                        }),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([8, 12])
+            .style(theme::muted_card_style),
+        )
+    });
+
+    rows.into()
+}
+
 fn render_gigo_banner<'a>(
-    audio_report: Option<&'a DeckAudioReport>,
+    state: &'a SetupState,
+    workspace: &'a DeckWorkspaceConfig,
+    loaded_cards: &'a [AnkiCard],
+    active_deck_name: Option<&str>,
     colors: &'static ThemeTokens,
 ) -> Element<'a, Message> {
     let mut header = row![
@@ -385,9 +450,27 @@ fn render_gigo_banner<'a>(
             .color(colors.amber),
         space().width(Length::Fill),
     ]
+    .spacing(8)
     .align_y(Alignment::Center);
 
-    if let Some(report) = audio_report {
+    let excluded_entries = active_deck_name
+        .map(|name| workspace.excluded_entries_for_deck(name))
+        .unwrap_or_default();
+    let excluded_count = excluded_entries.len();
+
+    if excluded_count > 0 {
+        header = header.push(
+            container(
+                text(format!("{excluded_count} excluded"))
+                    .size(12)
+                    .color(colors.text_muted),
+            )
+            .padding([4, 10])
+            .style(theme::badge_style(colors.card_muted, colors.border)),
+        );
+    }
+
+    if let Some(report) = &state.audio_report {
         let badge = if report.has_issues() {
             container(
                 text(format!("{} flagged", report.flagged_cards))
@@ -410,15 +493,81 @@ fn render_gigo_banner<'a>(
             .size(14)
             .color(colors.text_primary),
     ]
-    .spacing(8);
+    .spacing(10);
 
-    if let Some(report) = audio_report {
+    if let Some(report) = &state.audio_report {
         let report_color = if report.has_issues() {
             colors.amber
         } else {
             colors.sage
         };
         content = content.push(text(report.summary_line()).size(13).color(report_color));
+    }
+
+    let unexcluded_invalid_count = active_deck_name.map_or(0, |deck_name| {
+        loaded_cards
+            .iter()
+            .filter(|card| {
+                card.has_audio_warnings() && !workspace.is_card_excluded(deck_name, card.card_id)
+            })
+            .count()
+    });
+
+    let mut action_row = row![].spacing(10).align_y(Alignment::Center);
+    let mut has_actions = false;
+
+    if unexcluded_invalid_count > 0 {
+        has_actions = true;
+        action_row = action_row.push(
+            button(
+                text(format!(
+                    "Auto-Exclude Invalid Audio Cards ({unexcluded_invalid_count})"
+                ))
+                .size(13),
+            )
+            .padding([8, 14])
+            .style(theme::secondary_button_style)
+            .on_press(Message::AutoExcludeInvalidAudioCards),
+        );
+    }
+
+    if excluded_count > 0
+        && let Some(deck_name) = active_deck_name
+    {
+        has_actions = true;
+        let toggle_label = if state.show_excluded_list {
+            "Hide Excluded"
+        } else {
+            "View Excluded"
+        };
+        action_row = action_row
+            .push(
+                button(text(toggle_label).size(13))
+                    .padding([8, 14])
+                    .style(theme::secondary_button_style)
+                    .on_press(Message::ToggleExcludedCardsList),
+            )
+            .push(
+                button(text("Restore Excluded").size(13))
+                    .padding([8, 14])
+                    .style(theme::secondary_button_style)
+                    .on_press(Message::RestoreAllExcludedCards(deck_name.to_string())),
+            );
+    }
+
+    if has_actions {
+        content = content.push(action_row);
+    }
+
+    if state.show_excluded_list
+        && !excluded_entries.is_empty()
+        && let Some(deck_name) = active_deck_name
+    {
+        content = content.push(render_excluded_entries_list(
+            deck_name,
+            &excluded_entries,
+            colors,
+        ));
     }
 
     container(content)
@@ -755,6 +904,8 @@ where
 
 fn render_preview_card<'a>(
     state: &'a SetupState,
+    workspace: &'a DeckWorkspaceConfig,
+    active_deck_name: Option<&str>,
     colors: &'static ThemeTokens,
 ) -> Element<'a, Message> {
     let Some(card) = state.current_preview_card() else {
@@ -777,28 +928,50 @@ fn render_preview_card<'a>(
 
     let sample_total = state.sample_notes.len();
     let sample_pos = state.sample_index + 1;
+    let is_excluded = active_deck_name
+        .is_some_and(|deck| workspace.is_card_excluded(deck, card.card_id));
 
-    let nav_row = row![
+    let mut nav_row = row![
         text("3. Live Sample Card Preview")
             .size(18)
             .color(colors.text_primary),
         space().width(Length::Fill),
-        text(format!("Sample {sample_pos} of {sample_total}"))
-            .size(13)
-            .color(colors.text_muted),
-        button(text("Previous").size(13))
-            .padding([6, 12])
-            .style(theme::secondary_button_style)
-            .on_press_maybe((state.sample_index > 0).then_some(Message::PrevPreviewCard)),
-        button(text("Next").size(13))
-            .padding([6, 12])
-            .style(theme::secondary_button_style)
-            .on_press_maybe(
-                (state.sample_index + 1 < sample_total).then_some(Message::NextPreviewCard)
-            ),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
+
+    if is_excluded {
+        nav_row = nav_row.push(
+            container(
+                text("Excluded from practice")
+                    .size(12)
+                    .color(colors.amber),
+            )
+            .padding([4, 10])
+            .style(theme::badge_style(colors.amber_soft, colors.amber)),
+        );
+    }
+
+    nav_row = nav_row
+        .push(
+            text(format!("Sample {sample_pos} of {sample_total}"))
+                .size(13)
+                .color(colors.text_muted),
+        )
+        .push(
+            button(text("Previous").size(13))
+                .padding([6, 12])
+                .style(theme::secondary_button_style)
+                .on_press_maybe((state.sample_index > 0).then_some(Message::PrevPreviewCard)),
+        )
+        .push(
+            button(text("Next").size(13))
+                .padding([6, 12])
+                .style(theme::secondary_button_style)
+                .on_press_maybe(
+                    (state.sample_index + 1 < sample_total).then_some(Message::NextPreviewCard),
+                ),
+        );
 
     let word_display = if card.word.is_empty() {
         "—".to_string()
@@ -931,6 +1104,34 @@ fn render_preview_card<'a>(
             )
             .padding([4, 10])
             .style(theme::badge_style(colors.sage_soft, colors.sage)),
+        );
+    }
+
+    if let Some(deck_name) = active_deck_name {
+        let exclusion_action = if is_excluded {
+            button(text("Restore Card").size(13))
+                .padding([8, 14])
+                .style(theme::secondary_button_style)
+                .on_press(Message::RestoreCard {
+                    deck_name: deck_name.to_string(),
+                    card_id: card.card_id,
+                })
+        } else {
+            button(text("Exclude Card").size(13))
+                .padding([8, 14])
+                .style(theme::secondary_button_style)
+                .on_press(Message::ExcludePreviewCard)
+        };
+
+        preview_body = preview_body.push(
+            row![
+                exclusion_action,
+                text("Skips this card in Kotodama without modifying your Anki deck.")
+                    .size(12)
+                    .color(colors.text_muted),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
         );
     }
 

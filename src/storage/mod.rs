@@ -88,7 +88,7 @@ fn save_json_pretty<T: Serialize>(path: &Path, value: &T, label: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use chrono::Utc;
@@ -187,6 +187,14 @@ mod tests {
                 flagged_audio_count: 2,
             }),
             saved_mappings,
+            excluded_card_ids: BTreeMap::from([(
+                "Core 2k".to_string(),
+                BTreeSet::from([5001_i64, 5003_i64]),
+            )]),
+            excluded_card_labels: BTreeMap::from([
+                (5001_i64, "靴 (くつ)".to_string()),
+                (5003_i64, "橋 (はし)".to_string()),
+            ]),
         };
 
         save_deck_workspace(&path, &workspace)?;
