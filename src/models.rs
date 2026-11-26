@@ -387,6 +387,22 @@ impl DecodedAudio {
         let frames = self.frame_count() as u64;
         frames.saturating_mul(1000) / u64::from(self.sample_rate)
     }
+
+    /// Mixes interleaved multi-channel samples down to a single mono `f32` buffer.
+    pub fn to_mono(&self) -> Vec<f32> {
+        if self.channels == 0 || self.samples.is_empty() {
+            return Vec::new();
+        }
+        if self.channels == 1 {
+            return self.samples.clone();
+        }
+        let ch = usize::from(self.channels);
+        let scale = 1.0 / ch as f32;
+        self.samples
+            .chunks_exact(ch)
+            .map(|frame| frame.iter().copied().sum::<f32>() * scale)
+            .collect()
+    }
 }
 
 /// Audio quality problems detected during pre-flight deck validation.
@@ -521,7 +537,6 @@ impl PracticeMode {
 }
 
 /// Result of comparing user pitch contour against reference audio.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PitchAnalysis {
     /// Reference F0 values normalized to semitones relative to reference median (`None` = unvoiced).
@@ -540,7 +555,6 @@ pub struct PitchAnalysis {
     pub analyzed_at: DateTime<Utc>,
 }
 
-#[allow(dead_code)]
 impl PitchAnalysis {
     /// Creates a validated [`PitchAnalysis`] record.
     pub fn new(
@@ -974,7 +988,6 @@ pub enum PlaybackSpeed {
 
 impl PlaybackSpeed {
     /// Returns the numeric playback rate multiplier.
-    #[allow(dead_code)]
     pub const fn multiplier(self) -> f32 {
         match self {
             Self::Slow => 0.75,
@@ -1063,6 +1076,225 @@ impl ResolvedTheme {
     }
 }
 
+/// Metadata describing an available system audio input device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputDeviceInfo {
+    /// Human-readable device name reported by the audio host.
+    pub name: String,
+    /// Whether this device is currently the system's default input device.
+    pub is_default: bool,
+}
+
+/// Configuration parameters controlling Voice Activity Detection and silence trimming.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VadConfig {
+    /// Minimum frame RMS amplitude required to classify a frame as speech.
+    pub rms_threshold: f32,
+    /// Duration of trailing silence in milliseconds before auto-stopping capture.
+    pub trailing_silence_ms: u64,
+    /// Analysis frame window duration in milliseconds.
+    pub frame_ms: u64,
+    /// Leading and trailing padding in milliseconds retained around trimmed speech.
+    pub padding_ms: u64,
+    /// Whether capture automatically stops after trailing silence is detected.
+    pub auto_stop: bool,
+    /// Maximum recording length in milliseconds before capture automatically stops.
+    pub max_duration_ms: u64,
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            rms_threshold: 0.025,
+            trailing_silence_ms: 1000,
+            frame_ms: 20,
+            padding_ms: 60,
+            auto_stop: true,
+            max_duration_ms: 15_000,
+        }
+    }
+}
+
+impl VadConfig {
+    /// Validates that VAD thresholds and timing parameters are finite and positive.
+    pub fn validate(&self) -> Result<()> {
+        if !self.rms_threshold.is_finite() || self.rms_threshold <= 0.0 || self.rms_threshold > 1.0 {
+            bail!("VAD RMS threshold must be finite and within (0.0, 1.0]");
+        }
+        if self.frame_ms == 0 {
+            bail!("VAD frame duration must be at least 1 ms");
+        }
+        if self.max_duration_ms < self.frame_ms {
+            bail!("Maximum recording duration must be at least one VAD frame");
+        }
+        Ok(())
+    }
+
+    /// Builds a [`VadConfig`] from persisted [`AppSettings`].
+    pub fn from_settings(settings: &AppSettings) -> Self {
+        Self {
+            rms_threshold: settings.vad_rms_threshold.clamp(0.005, 0.25),
+            trailing_silence_ms: settings.vad_silence_ms.max(200),
+            auto_stop: settings.auto_stop_vad,
+            ..Self::default()
+        }
+    }
+}
+
+/// Instantaneous microphone signal telemetry used for live level meters and calibration.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MicLevelSnapshot {
+    /// Root-mean-square amplitude over the recent capture window.
+    pub rms: f32,
+    /// Peak absolute sample amplitude over the recent capture window.
+    pub peak: f32,
+    /// Normalized meter level mapped to `0.0..=1.0` from `-60..=0 dBFS`.
+    pub meter_ratio: f32,
+    /// Whether the signal reached near-full-scale clipping (`peak >= 0.98`).
+    pub is_clipping: bool,
+    /// Whether the RMS level exceeds the active VAD speech threshold.
+    pub is_speech: bool,
+    /// Signal level in decibels relative to full scale (`-60.0..=0.0`).
+    pub db_fs: f32,
+}
+
+impl Default for MicLevelSnapshot {
+    fn default() -> Self {
+        Self {
+            rms: 0.0,
+            peak: 0.0,
+            meter_ratio: 0.0,
+            is_clipping: false,
+            is_speech: false,
+            db_fs: -60.0,
+        }
+    }
+}
+
+impl MicLevelSnapshot {
+    /// Computes a [`MicLevelSnapshot`] from a slice of mono `f32` audio samples.
+    pub fn from_samples(samples: &[f32], vad_threshold: f32) -> Self {
+        if samples.is_empty() {
+            return Self::default();
+        }
+        let mut sum_sq = 0.0_f64;
+        let mut peak = 0.0_f32;
+        for &sample in samples {
+            if sample.is_finite() {
+                let abs = sample.abs();
+                if abs > peak {
+                    peak = abs;
+                }
+                let s = f64::from(sample);
+                sum_sq += s * s;
+            }
+        }
+        let rms = (sum_sq / samples.len() as f64).sqrt() as f32;
+        let db_fs = (20.0 * rms.max(1e-6).log10()).clamp(-60.0, 0.0);
+        let meter_ratio = ((db_fs + 60.0) / 60.0).clamp(0.0, 1.0);
+
+        Self {
+            rms,
+            peak,
+            meter_ratio,
+            is_clipping: peak >= 0.98,
+            is_speech: rms >= vad_threshold,
+            db_fs,
+        }
+    }
+}
+
+/// Configuration parameters for YIN fundamental frequency (`F0`) pitch extraction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PitchExtractionConfig {
+    /// Minimum expected fundamental frequency in Hertz.
+    pub min_f0_hz: f32,
+    /// Maximum expected fundamental frequency in Hertz.
+    pub max_f0_hz: f32,
+    /// Analysis hop step size in milliseconds.
+    pub hop_ms: f32,
+    /// YIN cumulative mean normalized difference threshold (`0.0..1.0`).
+    pub yin_threshold: f32,
+    /// Minimum frame RMS amplitude required to emit a voiced pitch estimate.
+    pub min_voiced_rms: f32,
+}
+
+impl Default for PitchExtractionConfig {
+    fn default() -> Self {
+        Self {
+            min_f0_hz: 65.0,
+            max_f0_hz: 500.0,
+            hop_ms: 10.0,
+            yin_threshold: 0.15,
+            min_voiced_rms: 0.01,
+        }
+    }
+}
+
+impl PitchExtractionConfig {
+    /// Validates that pitch extraction bounds and thresholds are finite and well-ordered.
+    pub fn validate(&self) -> Result<()> {
+        if !self.min_f0_hz.is_finite() || self.min_f0_hz <= 0.0 {
+            bail!("Minimum F0 must be finite and greater than 0 Hz");
+        }
+        if !self.max_f0_hz.is_finite() || self.max_f0_hz <= self.min_f0_hz {
+            bail!("Maximum F0 must be finite and greater than minimum F0");
+        }
+        if !self.hop_ms.is_finite() || self.hop_ms <= 0.0 {
+            bail!("Pitch hop duration must be finite and greater than 0 ms");
+        }
+        if !self.yin_threshold.is_finite() || self.yin_threshold <= 0.0 || self.yin_threshold >= 1.0
+        {
+            bail!("YIN threshold must be finite and strictly within (0.0, 1.0)");
+        }
+        if !self.min_voiced_rms.is_finite() || self.min_voiced_rms < 0.0 {
+            bail!("Minimum voiced RMS must be finite and non-negative");
+        }
+        Ok(())
+    }
+}
+
+/// Reason why an active microphone recording session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureStopReason {
+    /// Recording was stopped explicitly by the user.
+    Manual,
+    /// Recording stopped automatically after trailing VAD silence.
+    AutoStopSilence,
+    /// Recording stopped because the maximum clip duration cap was reached.
+    MaxDurationReached,
+}
+
+impl CaptureStopReason {
+    /// Returns a concise human-readable label describing why capture stopped.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual stop",
+            Self::AutoStopSilence => "Auto-stopped (VAD silence)",
+            Self::MaxDurationReached => "Max duration reached",
+        }
+    }
+}
+
+/// Recorded microphone audio paired with VAD-trimmed speech and signal metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedTake {
+    /// Unmodified mono audio captured from the microphone.
+    pub raw_audio: DecodedAudio,
+    /// Audio trimmed around detected speech boundaries via VAD.
+    pub trimmed_audio: DecodedAudio,
+    /// Peak absolute sample level observed across the raw recording.
+    pub peak_level: f32,
+    /// Whether speech energy exceeding the VAD threshold was detected.
+    pub speech_detected: bool,
+    /// Reason recording terminated.
+    pub stop_reason: CaptureStopReason,
+}
+
+fn default_vad_rms_threshold() -> f32 {
+    0.025
+}
+
 /// User-configurable ergonomics, audio, and scheduling settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -1073,6 +1305,12 @@ pub struct AppSettings {
     pub auto_stop_vad: bool,
     /// Duration of trailing silence in milliseconds before auto-stopping recording.
     pub vad_silence_ms: u64,
+    /// Minimum RMS speech threshold used by VAD silence detection and calibration.
+    #[serde(default = "default_vad_rms_threshold")]
+    pub vad_rms_threshold: f32,
+    /// Optional preferred microphone device name (`None` uses the system default).
+    #[serde(default)]
+    pub preferred_input_device: Option<String>,
     /// Reference playback speed setting.
     pub playback_speed: PlaybackSpeed,
     /// Hide target text until after recording finishes.
@@ -1089,6 +1327,8 @@ impl Default for AppSettings {
             theme_preference: ThemePreference::default(),
             auto_stop_vad: true,
             vad_silence_ms: 1000,
+            vad_rms_threshold: default_vad_rms_threshold(),
+            preferred_input_device: None,
             playback_speed: PlaybackSpeed::Normal,
             blind_mode: false,
             daily_goal: DailyGoal::default(),
@@ -1412,6 +1652,8 @@ mod tests {
             theme_preference: ThemePreference::Dark,
             auto_stop_vad: false,
             vad_silence_ms: 1200,
+            vad_rms_threshold: 0.04,
+            preferred_input_device: Some("Studio USB Mic".to_string()),
             playback_speed: PlaybackSpeed::Slow,
             blind_mode: true,
             daily_goal: DailyGoal::Minutes(15),
@@ -1432,6 +1674,74 @@ mod tests {
         }"#;
         let migrated: AppSettings = serde_json::from_str(legacy_json)?;
         assert_eq!(migrated.theme_preference, ThemePreference::System);
+        assert!((migrated.vad_rms_threshold - 0.025).abs() < 1e-6);
+        assert_eq!(migrated.preferred_input_device, None);
+        Ok(())
+    }
+
+    #[test]
+    fn decoded_audio_to_mono_handles_mono_stereo_and_empty() {
+        let stereo = DecodedAudio {
+            samples: vec![0.4, -0.2, 0.8, 0.4],
+            sample_rate: 16_000,
+            channels: 2,
+        };
+        let mono = stereo.to_mono();
+        assert_eq!(mono.len(), 2);
+        assert!((mono[0] - 0.1).abs() < 1e-5);
+        assert!((mono[1] - 0.6).abs() < 1e-5);
+
+        let already_mono = DecodedAudio {
+            samples: vec![0.25, -0.5],
+            sample_rate: 16_000,
+            channels: 1,
+        };
+        assert_eq!(already_mono.to_mono(), vec![0.25, -0.5]);
+
+        let invalid = DecodedAudio {
+            samples: vec![0.1, 0.2],
+            sample_rate: 16_000,
+            channels: 0,
+        };
+        assert!(invalid.to_mono().is_empty());
+    }
+
+    #[test]
+    fn vad_and_pitch_configs_validate_and_mic_snapshot_computes_levels() -> Result<()> {
+        let mut vad = VadConfig::default();
+        vad.validate()?;
+        vad.rms_threshold = 0.0;
+        assert!(vad.validate().is_err());
+
+        let settings = AppSettings {
+            vad_rms_threshold: 0.06,
+            vad_silence_ms: 800,
+            auto_stop_vad: false,
+            ..AppSettings::default()
+        };
+        let from_settings = VadConfig::from_settings(&settings);
+        assert!((from_settings.rms_threshold - 0.06).abs() < 1e-6);
+        assert_eq!(from_settings.trailing_silence_ms, 800);
+        assert!(!from_settings.auto_stop);
+
+        let mut pitch_cfg = PitchExtractionConfig::default();
+        pitch_cfg.validate()?;
+        pitch_cfg.max_f0_hz = 50.0;
+        assert!(pitch_cfg.validate().is_err());
+
+        let silent = MicLevelSnapshot::from_samples(&[0.0, 0.0, 0.0], 0.025);
+        assert!(!silent.is_speech);
+        assert!(!silent.is_clipping);
+        assert!((silent.db_fs + 60.0).abs() < 1e-4);
+
+        let loud = MicLevelSnapshot::from_samples(&[0.5, -0.99, 0.5], 0.025);
+        assert!(loud.is_speech);
+        assert!(loud.is_clipping);
+        assert!(loud.meter_ratio > 0.7);
+        assert_eq!(
+            CaptureStopReason::AutoStopSilence.label(),
+            "Auto-stopped (VAD silence)"
+        );
         Ok(())
     }
 
