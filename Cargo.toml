@@ -7,3 +7,10 @@ description = "A local-first, gamified Japanese pronunciation and pitch-accent t
 repository = "https://github.com/Daniel-McLarty/kotodama"
 
 [dependencies]
+anyhow = "1.0.105"
+chrono = { version = "0.4.45", features = ["serde"] }
+iced = { version = "0.14.0", features = ["canvas"] }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.154"
