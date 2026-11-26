@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
 mod models;
+mod ui;
 
 fn main() {
-    println!("Kotodama v{}", env!("CARGO_PKG_VERSION"));
+    let theme = ui::theme::kotodama_theme();
+    println!("Kotodama v{} ({})", env!("CARGO_PKG_VERSION"), theme);
 }
