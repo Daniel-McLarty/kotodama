@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use std::f32::consts::TAU;
 use std::fs::File;
 use std::num::NonZero;
 use std::path::Path;
@@ -17,7 +18,7 @@ use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 
-use crate::models::DecodedAudio;
+use crate::models::{DecodedAudio, PlaybackSpeed};
 
 /// Decodes an audio file (`.mp3`, `.ogg`, `.wav`, `.flac`, `.m4a`, etc.) into interleaved `f32` PCM.
 pub fn decode_audio_file(path: &Path) -> Result<DecodedAudio> {
@@ -178,13 +179,168 @@ fn play_on_persistent_sink(
     Ok(())
 }
 
-/// Decodes and plays an audio clip on a persistent system output sink until completion.
-pub fn play_audio_file(path: &Path) -> Result<()> {
-    let decoded = decode_audio_file(path)?;
-    let _ = validate_playback_params(&decoded)?;
+/// Time-stretches `audio` to the requested [`PlaybackSpeed`] while preserving vocal pitch via WSOLA.
+pub fn time_stretch_preserve_pitch(
+    audio: &DecodedAudio,
+    speed: PlaybackSpeed,
+) -> Result<DecodedAudio> {
+    let _ = validate_playback_params(audio)?;
+    if audio.samples.is_empty() {
+        bail!("Cannot time-stretch an empty audio buffer");
+    }
+
+    if speed == PlaybackSpeed::Normal {
+        return Ok(audio.clone());
+    }
+
+    let rate = speed.multiplier();
+    let total_frames = audio.frame_count();
+    let mut win_len = ((audio.sample_rate as f32 * 0.030).round() as usize).max(64);
+    if !win_len.is_multiple_of(2) {
+        win_len += 1;
+    }
+    if total_frames <= win_len + 4 {
+        return Ok(audio.clone());
+    }
+
+    let syn_hop = win_len / 2;
+    let delta = ((audio.sample_rate as f32 * 0.010).round() as usize).max(1);
+    let hann: Vec<f32> = (0..win_len)
+        .map(|i| 0.5 * (1.0 - (TAU * i as f32 / win_len as f32).cos()))
+        .collect();
+    let mono = audio.to_mono();
+    let ch = usize::from(audio.channels);
+
+    let est_frames = ((total_frames as f32 / rate).ceil() as usize) + win_len * 2;
+    let mut out_samples = vec![0.0_f32; est_frames * ch];
+    let mut weight_sum = vec![0.0_f32; est_frames];
+
+    let mut max_written_frame = 0_usize;
+    let overlap_add = |out_samples: &mut Vec<f32>,
+                       weight_sum: &mut Vec<f32>,
+                       max_written_frame: &mut usize,
+                       in_start: usize,
+                       out_start: usize| {
+        let needed_frames = out_start + win_len;
+        if needed_frames > weight_sum.len() {
+            weight_sum.resize(needed_frames, 0.0);
+            out_samples.resize(needed_frames * ch, 0.0);
+        }
+        for i in 0..win_len {
+            let w = hann[i];
+            let in_base = (in_start + i) * ch;
+            let out_base = (out_start + i) * ch;
+            for c in 0..ch {
+                out_samples[out_base + c] += audio.samples[in_base + c] * w;
+            }
+            weight_sum[out_start + i] += w;
+        }
+        if needed_frames > *max_written_frame {
+            *max_written_frame = needed_frames;
+        }
+    };
+
+    overlap_add(&mut out_samples, &mut weight_sum, &mut max_written_frame, 0, 0);
+    let mut prev_in = 0_usize;
+    let mut step = 1_usize;
+
+    loop {
+        let nom_pos = ((step * syn_hop) as f32 * rate).round() as usize;
+        if nom_pos + win_len > total_frames {
+            break;
+        }
+
+        let nat_pos = prev_in + syn_hop;
+        let best_cand = if nat_pos + win_len <= total_frames {
+            let min_cand = nom_pos.saturating_sub(delta);
+            let max_cand = (nom_pos + delta).min(total_frames - win_len);
+            find_best_wsola_offset(&mono, nat_pos, min_cand, max_cand, win_len, nom_pos)
+        } else {
+            nom_pos
+        };
+
+        let out_pos = step * syn_hop;
+        overlap_add(
+            &mut out_samples,
+            &mut weight_sum,
+            &mut max_written_frame,
+            best_cand,
+            out_pos,
+        );
+        prev_in = best_cand;
+        step += 1;
+    }
+
+    out_samples.truncate(max_written_frame * ch);
+    for (frame_idx, &w) in weight_sum[..max_written_frame].iter().enumerate() {
+        let base = frame_idx * ch;
+        if w > 1e-4 {
+            let inv = 1.0 / w;
+            for c in 0..ch {
+                out_samples[base + c] = (out_samples[base + c] * inv).clamp(-1.0, 1.0);
+            }
+        } else {
+            for c in 0..ch {
+                out_samples[base + c] = 0.0;
+            }
+        }
+    }
+
+    Ok(DecodedAudio {
+        samples: out_samples,
+        sample_rate: audio.sample_rate,
+        channels: audio.channels,
+    })
+}
+
+fn find_best_wsola_offset(
+    mono: &[f32],
+    nat_pos: usize,
+    min_cand: usize,
+    max_cand: usize,
+    win_len: usize,
+    fallback: usize,
+) -> usize {
+    let target = &mono[nat_pos..nat_pos + win_len];
+    let target_energy: f32 = target.iter().map(|&s| s * s).sum();
+    if target_energy <= 1e-9 {
+        return fallback;
+    }
+
+    let mut best_cand = fallback;
+    let mut best_score = f32::NEG_INFINITY;
+
+    for cand in min_cand..=max_cand {
+        let candidate = &mono[cand..cand + win_len];
+        let mut dot = 0.0_f32;
+        let mut cand_energy = 0.0_f32;
+        for (&a, &b) in target.iter().zip(candidate.iter()) {
+            dot += a * b;
+            cand_energy += b * b;
+        }
+        let denom = (target_energy * cand_energy).sqrt();
+        if denom > 1e-9 {
+            let score = dot / denom;
+            if score > best_score {
+                best_score = score;
+                best_cand = cand;
+            }
+        }
+    }
+
+    best_cand
+}
+
+/// Plays an in-memory [`DecodedAudio`] buffer at the requested [`PlaybackSpeed`] on the persistent output sink.
+pub fn play_decoded_audio(decoded: DecodedAudio, speed: PlaybackSpeed) -> Result<()> {
+    let stretched = time_stretch_preserve_pitch(&decoded, speed)?;
+    let _ = validate_playback_params(&stretched)?;
 
     let (reply_tx, reply_rx) = mpsc::channel();
-    let job = PlaybackJob { decoded, reply_tx };
+    let job = PlaybackJob {
+        decoded: stretched,
+        reply_tx,
+    };
 
     {
         let sender_lock = playback_worker_sender()?;
@@ -199,6 +355,17 @@ pub fn play_audio_file(path: &Path) -> Result<()> {
     reply_rx
         .recv()
         .context("Audio playback worker disconnected before finishing playback")?
+}
+
+/// Decodes and plays an audio clip at the specified [`PlaybackSpeed`] until completion.
+pub fn play_audio_file_at_speed(path: &Path, speed: PlaybackSpeed) -> Result<()> {
+    let decoded = decode_audio_file(path)?;
+    play_decoded_audio(decoded, speed)
+}
+
+/// Decodes and plays an audio clip at normal (`1.0x`) speed on a persistent system output sink.
+pub fn play_audio_file(path: &Path) -> Result<()> {
+    play_audio_file_at_speed(path, PlaybackSpeed::Normal)
 }
 
 #[cfg(test)]
@@ -292,6 +459,67 @@ mod tests {
             channels: 0,
         };
         assert!(validate_playback_params(&zero_channels).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn time_stretch_normal_returns_unchanged_and_slow_extends_duration_cleanly() -> Result<()> {
+        let sample_rate = 16_000_u32;
+        let frames = (sample_rate as usize * 600) / 1000;
+        let mono_samples: Vec<f32> = (0..frames)
+            .map(|i| (TAU * 220.0 * i as f32 / sample_rate as f32).sin() * 0.5)
+            .collect();
+        let mono = DecodedAudio {
+            samples: mono_samples,
+            sample_rate,
+            channels: 1,
+        };
+
+        let normal = time_stretch_preserve_pitch(&mono, PlaybackSpeed::Normal)?;
+        assert_eq!(normal, mono);
+
+        let slow = time_stretch_preserve_pitch(&mono, PlaybackSpeed::Slow)?;
+        assert_eq!(slow.sample_rate, sample_rate);
+        assert_eq!(slow.channels, 1);
+        let ratio = slow.duration_ms() as f32 / mono.duration_ms() as f32;
+        assert!(
+            (1.25..=1.42).contains(&ratio),
+            "expected ~1.33x duration ratio at 0.75x speed, got {ratio:.3}"
+        );
+        assert!(
+            slow.samples
+                .iter()
+                .all(|&s| s.is_finite() && (-1.0..=1.0).contains(&s))
+        );
+
+        let stereo_samples: Vec<f32> = mono.samples.iter().flat_map(|&s| [s, -s]).collect();
+        let stereo = DecodedAudio {
+            samples: stereo_samples,
+            sample_rate,
+            channels: 2,
+        };
+        let slow_stereo = time_stretch_preserve_pitch(&stereo, PlaybackSpeed::Slow)?;
+        assert_eq!(slow_stereo.channels, 2);
+        assert_eq!(slow_stereo.samples.len() % 2, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn time_stretch_handles_short_and_invalid_buffers_without_panicking() -> Result<()> {
+        let tiny = DecodedAudio {
+            samples: vec![0.1; 120],
+            sample_rate: 16_000,
+            channels: 1,
+        };
+        let stretched_tiny = time_stretch_preserve_pitch(&tiny, PlaybackSpeed::Slow)?;
+        assert_eq!(stretched_tiny, tiny);
+
+        let empty = DecodedAudio {
+            samples: Vec::new(),
+            sample_rate: 16_000,
+            channels: 1,
+        };
+        assert!(time_stretch_preserve_pitch(&empty, PlaybackSpeed::Slow).is_err());
         Ok(())
     }
 }
