@@ -46,7 +46,6 @@ pub const AMBER_SOFT: Color = color!(0xFE, 0xF4, 0xDF);
 pub const SAGE: Color = color!(0x52, 0x99, 0x6E);
 
 /// Soft sage background tint for success badges and progress pills.
-#[allow(dead_code)]
 pub const SAGE_SOFT: Color = color!(0xEA, 0xF5, 0xEE);
 
 /// Warm crimson used for recoverable error states and alerts.
@@ -56,7 +55,6 @@ pub const DANGER: Color = color!(0xC9, 0x4A, 0x4A);
 pub const DANGER_SOFT: Color = color!(0xFD, 0xEC, 0xEC);
 
 /// Builds Kotodama's custom warm and playful Iced [`Theme`].
-#[allow(dead_code)]
 pub fn kotodama_theme() -> Theme {
     Theme::custom(
         "Kotodama Warm".to_string(),
@@ -72,7 +70,6 @@ pub fn kotodama_theme() -> Theme {
 }
 
 /// Container style for the root application background.
-#[allow(dead_code)]
 pub fn app_shell_style(_theme: &Theme) -> container::Style {
     container::Style {
         text_color: Some(WARM_SLATE),
@@ -82,7 +79,6 @@ pub fn app_shell_style(_theme: &Theme) -> container::Style {
 }
 
 /// Container style for the left navigation sidebar.
-#[allow(dead_code)]
 pub fn sidebar_style(_theme: &Theme) -> container::Style {
     container::Style {
         text_color: Some(WARM_SLATE),
@@ -97,7 +93,6 @@ pub fn sidebar_style(_theme: &Theme) -> container::Style {
 }
 
 /// Rounded surface style for primary content cards.
-#[allow(dead_code)]
 pub fn card_style(_theme: &Theme) -> container::Style {
     container::Style {
         text_color: Some(WARM_SLATE),
@@ -117,7 +112,6 @@ pub fn card_style(_theme: &Theme) -> container::Style {
 }
 
 /// Rounded muted surface style for nested helper cards and shortcut blocks.
-#[allow(dead_code)]
 pub fn muted_card_style(_theme: &Theme) -> container::Style {
     container::Style {
         text_color: Some(WARM_SLATE),
@@ -132,7 +126,6 @@ pub fn muted_card_style(_theme: &Theme) -> container::Style {
 }
 
 /// Highlighted amber callout style for the Garbage-In, Garbage-Out deck warning.
-#[allow(dead_code)]
 pub fn gigo_banner_style(_theme: &Theme) -> container::Style {
     container::Style {
         text_color: Some(WARM_SLATE),
@@ -147,7 +140,6 @@ pub fn gigo_banner_style(_theme: &Theme) -> container::Style {
 }
 
 /// Returns a container style closure for dismissible error and warning toasts.
-#[allow(dead_code)]
 pub fn toast_card_style(severity: ErrorSeverity) -> impl Fn(&Theme) -> container::Style {
     move |_theme| {
         let (bg, border) = match severity {
@@ -173,7 +165,6 @@ pub fn toast_card_style(severity: ErrorSeverity) -> impl Fn(&Theme) -> container
 }
 
 /// Returns a button style closure for sidebar navigation entries.
-#[allow(dead_code)]
 pub fn nav_button_style(is_active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
         let background = match (is_active, status) {
@@ -203,7 +194,6 @@ pub fn nav_button_style(is_active: bool) -> impl Fn(&Theme, button::Status) -> b
 }
 
 /// Primary coral button style for main call-to-action controls.
-#[allow(dead_code)]
 pub fn primary_button_style(_theme: &Theme, status: button::Status) -> button::Style {
     let background = match status {
         button::Status::Active => CORAL,
@@ -228,7 +218,6 @@ pub fn primary_button_style(_theme: &Theme, status: button::Status) -> button::S
 }
 
 /// Secondary warm-bordered button style for dismiss and auxiliary actions.
-#[allow(dead_code)]
 pub fn secondary_button_style(_theme: &Theme, status: button::Status) -> button::Style {
     let background = match status {
         button::Status::Hovered => CARD_MUTED,
@@ -248,7 +237,6 @@ pub fn secondary_button_style(_theme: &Theme, status: button::Status) -> button:
 }
 
 /// Returns a rounded pill button style closure for mode and option selectors.
-#[allow(dead_code)]
 pub fn pill_button_style(is_selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
         let background = match (is_selected, status) {
@@ -271,7 +259,6 @@ pub fn pill_button_style(is_selected: bool) -> impl Fn(&Theme, button::Status) -
 }
 
 /// Returns a rounded pill badge container style closure using `bg` and `border`.
-#[allow(dead_code)]
 pub fn badge_style(bg: Color, border: Color) -> impl Fn(&Theme) -> container::Style {
     move |_theme| container::Style {
         text_color: Some(WARM_SLATE),

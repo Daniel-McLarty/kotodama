@@ -8,7 +8,6 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Top-level navigation tabs in the Kotodama desktop interface.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NavTab {
     /// Deck selection, field mapping, and audio quality pre-flight view.
@@ -21,7 +20,6 @@ pub enum NavTab {
     Settings,
 }
 
-#[allow(dead_code)]
 impl NavTab {
     /// Ordered list of all primary navigation tabs.
     pub const ALL: [Self; 4] = [Self::Setup, Self::Practice, Self::Dashboard, Self::Settings];
@@ -66,7 +64,6 @@ pub enum DeckSource {
 }
 
 /// Maps Anki note field names to Kotodama's expected card fields.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldMapping {
     /// Note field containing the target word or expression.
@@ -212,7 +209,6 @@ impl AnkiCard {
 }
 
 /// Available pronunciation drill modes in Kotodama.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PracticeMode {
     /// Focuses on isolated kana/mora articulation clarity.
@@ -223,7 +219,6 @@ pub enum PracticeMode {
     CombinedShadowing,
 }
 
-#[allow(dead_code)]
 impl PracticeMode {
     /// Ordered list of all practice modes.
     pub const ALL: [Self; 3] = [
@@ -355,7 +350,6 @@ pub struct KanaMistakeEntry {
 }
 
 /// Cumulative pronunciation clarity statistics for a single target kana.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KanaStats {
     /// Target kana character or mora.
@@ -492,7 +486,6 @@ impl FsrsRating {
 }
 
 /// Configurable percentage thresholds mapping combined practice scores to FSRS ratings.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScoreThresholds {
     /// Minimum score percentage required for [`FsrsRating::Hard`].
@@ -594,7 +587,6 @@ impl FsrsCardState {
 }
 
 /// Configurable daily practice target measured in cards or minutes.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DailyGoal {
     /// Daily target number of reviewed cards.
@@ -609,7 +601,6 @@ impl Default for DailyGoal {
     }
 }
 
-#[allow(dead_code)]
 impl DailyGoal {
     /// Formats the daily goal for display in UI headers and settings.
     pub fn label(self) -> String {
@@ -621,7 +612,6 @@ impl DailyGoal {
 }
 
 /// Tracks consecutive practice days, daily goal progress, and lifetime sessions.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DailyStreak {
     /// Current consecutive days practiced.
@@ -640,7 +630,6 @@ pub struct DailyStreak {
     pub daily_goal: DailyGoal,
 }
 
-#[allow(dead_code)]
 impl DailyStreak {
     /// Records a completed practice session for `date` and updates streak counters.
     #[allow(dead_code)]
@@ -701,7 +690,6 @@ impl DailyStreak {
 }
 
 /// Reference audio playback speed options.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlaybackSpeed {
     /// Pitch-preserving 0.75x slow playback for shadowing fast native sentences.
@@ -710,9 +698,9 @@ pub enum PlaybackSpeed {
     Normal,
 }
 
-#[allow(dead_code)]
 impl PlaybackSpeed {
     /// Returns the numeric playback rate multiplier.
+    #[allow(dead_code)]
     pub const fn multiplier(self) -> f32 {
         match self {
             Self::Slow => 0.75,
@@ -730,7 +718,6 @@ impl PlaybackSpeed {
 }
 
 /// User-configurable ergonomics, audio, and scheduling settings.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     /// Automatically stop microphone capture after trailing VAD silence.
@@ -761,7 +748,6 @@ impl Default for AppSettings {
 }
 
 /// Visual severity level for non-fatal, dismissible user notifications.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorSeverity {
     /// Non-blocking caution such as audio quality flags or preview notices.
@@ -771,7 +757,6 @@ pub enum ErrorSeverity {
 }
 
 /// Dismissible notification toast surfaced in the UI for recoverable errors.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppErrorToast {
     /// Unique identifier used to dismiss individual toasts.
@@ -788,7 +773,6 @@ pub struct AppErrorToast {
     pub occurred_at: DateTime<Utc>,
 }
 
-#[allow(dead_code)]
 impl AppErrorToast {
     /// Creates an error-severity dismissible toast.
     pub fn error(
