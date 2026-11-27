@@ -238,8 +238,6 @@ pub enum Message {
     PracticeReviewCommitted {
         /// Card generation token ensuring the commit belongs to the active card.
         card_generation: u64,
-        /// Final FSRS rating persisted for the review.
-        rating: FsrsRating,
         /// Whether the applied rating differed from the automated recommendation.
         was_manual_override: bool,
         /// Scheduling outcome, updated daily streak, and latest pitch error percentage.
@@ -457,16 +455,31 @@ impl KotodamaApp {
         theme::kotodama_theme(self.resolved_theme())
     }
 
-    /// Subscribes to live OS light/dark theme change notifications and active mic telemetry.
+    /// Subscribes to live OS light/dark theme change notifications, active mic telemetry, session timers, and Practice shortcuts.
     pub fn subscription(&self) -> Subscription<Message> {
-        let theme_sub = iced::system::theme_changes().map(Message::SystemThemeChanged);
-        if self.mic_monitor.is_some() || self.mic_recording.is_some() {
-            let mic_sub = iced::time::every(Duration::from_millis(50))
-                .map(|_| Message::MicMonitorTick);
-            Subscription::batch([theme_sub, mic_sub])
-        } else {
-            theme_sub
+        let mut subs = vec![iced::system::theme_changes().map(Message::SystemThemeChanged)];
+
+        if self.mic_monitor.is_some()
+            || self.mic_recording.is_some()
+            || self.practice_recording.is_some()
+            || self.practice_state.countdown.is_some()
+        {
+            subs.push(
+                iced::time::every(Duration::from_millis(50)).map(|_| Message::MicMonitorTick),
+            );
         }
+
+        if self.practice_state.phase == PracticePhase::ActiveCard {
+            subs.push(
+                iced::time::every(Duration::from_secs(1)).map(|_| Message::PracticeSessionTick),
+            );
+        }
+
+        if self.active_tab == NavTab::Practice {
+            subs.push(iced::event::listen_with(practice_keyboard_event));
+        }
+
+        Subscription::batch(subs)
     }
 
     /// Records a recoverable error into the dismissible toast stack.
@@ -510,10 +523,19 @@ impl KotodamaApp {
                 if self.active_tab == NavTab::Settings && tab != NavTab::Settings {
                     self.stop_mic_activity();
                 }
+                if self.active_tab == NavTab::Practice && tab != NavTab::Practice {
+                    self.stop_practice_audio_and_countdown();
+                }
                 self.active_tab = tab;
             }
             Message::SelectPracticeMode(mode) => {
                 self.active_mode = mode;
+                if self.practice_state.phase == PracticePhase::ActiveCard {
+                    self.stop_practice_audio_and_countdown();
+                    self.practice_state
+                        .prepare_current_card(self.active_mode, self.settings.blind_mode);
+                    return self.launch_active_card_background_tasks();
+                }
             }
             Message::SystemThemeChanged(mode) => {
                 self.system_is_dark = match mode {
@@ -536,6 +558,9 @@ impl KotodamaApp {
             }
             Message::ToggleBlindMode(enabled) => {
                 self.settings.blind_mode = enabled;
+                if !enabled {
+                    self.practice_state.text_revealed = true;
+                }
                 self.persist_settings();
             }
             Message::SelectPlaybackSpeed(speed) => {
@@ -797,6 +822,32 @@ impl KotodamaApp {
                             Some("Reconnect your microphone or switch input devices.".to_string()),
                         );
                     }
+                }
+
+                if let Some(session) = self.practice_recording.as_ref() {
+                    self.practice_mic_level = session.snapshot();
+                    if let Some(err_msg) = session.take_error() {
+                        self.practice_recording = None;
+                        self.practice_mic_level = MicLevelSnapshot::default();
+                        let err = anyhow::anyhow!(err_msg);
+                        self.report_error(
+                            "Practice Microphone Interrupted",
+                            &err,
+                            Some("Check your microphone connection and press R to record again.".to_string()),
+                        );
+                    } else if session.is_finished()
+                        && let Some(finished_session) = self.practice_recording.take()
+                    {
+                        return self.finalize_practice_recording(finished_session);
+                    }
+                }
+
+                if self.practice_state.advance_countdown(Instant::now())
+                    && self.active_tab == NavTab::Practice
+                    && self.practice_state.phase == PracticePhase::ActiveCard
+                    && self.practice_recording.is_none()
+                {
+                    self.start_practice_recording();
                 }
             }
             Message::ToggleTestRecording => {
@@ -1144,28 +1195,327 @@ impl KotodamaApp {
             Message::ToggleExcludedCardsList => {
                 self.setup_state.show_excluded_list = !self.setup_state.show_excluded_list;
             }
-            Message::PracticeStartSession { .. }
-            | Message::PracticeDeckPrepared(_)
-            | Message::PracticeEndSession
-            | Message::PracticeContinueExtra
-            | Message::PracticeSelectTargetClip(_)
-            | Message::PracticeSelectMora(_)
-            | Message::PracticeRevealText
-            | Message::PracticeToggleShadowAutoRecord(_)
-            | Message::PracticeStartShadowFlow
-            | Message::PracticePlayReference
-            | Message::PracticeReferenceDecoded { .. }
-            | Message::PracticeReferencePlaybackFinished { .. }
-            | Message::PracticeToggleRecording
-            | Message::PracticeTakeEvaluated { .. }
-            | Message::PracticePlayUserTake
-            | Message::PracticeUserTakePlaybackFinished(_)
-            | Message::PracticeSubmitRating { .. }
-            | Message::PracticeReviewCommitted { .. }
-            | Message::PracticeCardContextLoaded { .. }
-            | Message::PracticeSkipCard
-            | Message::PracticeKeyShortcut(_)
-            | Message::PracticeSessionTick => {}
+            Message::PracticeStartSession { extra_study } => {
+                return self.handle_practice_start_session(extra_study);
+            }
+            Message::PracticeDeckPrepared(result) => {
+                return self.handle_practice_deck_prepared(result);
+            }
+            Message::PracticeEndSession => {
+                self.stop_practice_audio_and_countdown();
+                self.practice_state.reset_to_lobby();
+            }
+            Message::PracticeContinueExtra => {
+                self.practice_state.cap_override_active = true;
+                if self.practice_state.current_index < self.practice_state.queue.len() {
+                    self.practice_state.phase = PracticePhase::ActiveCard;
+                    self.practice_state
+                        .prepare_current_card(self.active_mode, self.settings.blind_mode);
+                    return self.launch_active_card_background_tasks();
+                }
+                return self.handle_practice_start_session(true);
+            }
+            Message::PracticeSelectTargetClip(clip) => {
+                if self.practice_state.phase == PracticePhase::ActiveCard
+                    && self.practice_state.target_clip != clip
+                {
+                    self.stop_practice_audio_and_countdown();
+                    self.practice_state.switch_target_clip(clip);
+                    return self.launch_reference_decode_task();
+                }
+            }
+            Message::PracticeSelectMora(index) => {
+                self.practice_state.selected_mora_index = Some(index);
+            }
+            Message::PracticeRevealText => {
+                self.practice_state.text_revealed = true;
+            }
+            Message::PracticeToggleShadowAutoRecord(enabled) => {
+                self.practice_state.shadow_auto_record = enabled;
+                if !enabled {
+                    self.practice_state.cancel_countdown();
+                }
+            }
+            Message::PracticeStartShadowFlow => {
+                if self.practice_state.phase == PracticePhase::ActiveCard
+                    && self.practice_recording.is_none()
+                    && !self.practice_state.is_playing_reference
+                {
+                    self.practice_state.cancel_countdown();
+                    self.practice_state.awaiting_shadow_countdown = true;
+                    return self.handle_practice_play_reference();
+                }
+            }
+            Message::PracticePlayReference => {
+                if self.practice_state.phase == PracticePhase::ActiveCard
+                    && self.practice_recording.is_none()
+                    && !self.practice_state.is_playing_reference
+                {
+                    if self.active_mode == PracticeMode::CombinedShadowing
+                        && self.practice_state.shadow_auto_record
+                    {
+                        self.practice_state.awaiting_shadow_countdown = true;
+                    }
+                    return self.handle_practice_play_reference();
+                }
+            }
+            Message::PracticeReferenceDecoded { generation, result } => {
+                if generation != self.practice_state.card_generation {
+                    return Task::none();
+                }
+                self.practice_state.is_decoding_reference = false;
+                match result {
+                    Ok((decoded, contour)) => {
+                        self.practice_state.reference_audio = Some(decoded);
+                        self.practice_state.reference_contour = contour;
+                        self.practice_state.reference_audio_error = None;
+                    }
+                    Err(err_msg) => {
+                        self.practice_state.reference_audio_error = Some(err_msg);
+                    }
+                }
+            }
+            Message::PracticeReferencePlaybackFinished { generation, result } => {
+                self.practice_state.is_playing_reference = false;
+                if generation != self.practice_state.card_generation {
+                    return Task::none();
+                }
+                if let Err(err_msg) = result {
+                    self.practice_state.awaiting_shadow_countdown = false;
+                    let err = anyhow::anyhow!(err_msg);
+                    self.report_error(
+                        "Reference Playback Failed",
+                        &err,
+                        Some("Verify your media directory and audio output device are connected.".to_string()),
+                    );
+                } else if self.practice_state.awaiting_shadow_countdown
+                    && self.active_tab == NavTab::Practice
+                    && self.practice_state.phase == PracticePhase::ActiveCard
+                {
+                    self.practice_state.start_countdown(Instant::now());
+                }
+            }
+            Message::PracticeToggleRecording => {
+                if self.practice_state.phase != PracticePhase::ActiveCard {
+                    return Task::none();
+                }
+                if let Some(session) = self.practice_recording.take() {
+                    return self.finalize_practice_recording(session);
+                }
+                self.practice_state.cancel_countdown();
+                self.start_practice_recording();
+            }
+            Message::PracticeTakeEvaluated {
+                take_generation,
+                result,
+            } => {
+                if take_generation != self.practice_state.take_generation {
+                    return Task::none();
+                }
+                self.practice_state.is_scoring = false;
+                match result {
+                    Ok(evaluation) => {
+                        self.practice_state.last_evaluation = Some(evaluation);
+                    }
+                    Err(err_msg) => {
+                        let err = anyhow::anyhow!(err_msg);
+                        self.report_error(
+                            "Pronunciation Scoring Failed",
+                            &err,
+                            Some("Speak clearly into the microphone or re-record your take.".to_string()),
+                        );
+                    }
+                }
+            }
+            Message::PracticePlayUserTake => {
+                if self.practice_state.phase != PracticePhase::ActiveCard
+                    || self.practice_recording.is_some()
+                    || self.practice_state.is_playing_user_take
+                {
+                    return Task::none();
+                }
+                let Some(take) = self.practice_state.last_take.as_ref() else {
+                    self.report_warning(
+                        "No Recorded Take Yet",
+                        "Press R to record your pronunciation first, then press T to play it back.",
+                        None,
+                    );
+                    return Task::none();
+                };
+                let audio = if take.trimmed_audio.samples.is_empty() {
+                    take.raw_audio.clone()
+                } else {
+                    take.trimmed_audio.clone()
+                };
+                if audio.samples.is_empty() {
+                    self.report_warning(
+                        "Empty Recording",
+                        "The recorded take contained zero playable samples.",
+                        Some("Check your microphone input level in Settings and try again.".to_string()),
+                    );
+                    return Task::none();
+                }
+                self.practice_state.is_playing_user_take = true;
+                let speed = self.settings.playback_speed;
+                return Task::perform(
+                    run_blocking(move || playback::play_decoded_audio(audio, speed)),
+                    Message::PracticeUserTakePlaybackFinished,
+                );
+            }
+            Message::PracticeUserTakePlaybackFinished(result) => {
+                self.practice_state.is_playing_user_take = false;
+                if let Err(err_msg) = result {
+                    let err = anyhow::anyhow!(err_msg);
+                    self.report_error(
+                        "Take Playback Failed",
+                        &err,
+                        Some("Verify your audio output device is connected.".to_string()),
+                    );
+                }
+            }
+            Message::PracticeSubmitRating { rating, is_manual } => {
+                return self.handle_practice_submit_rating(rating, is_manual);
+            }
+            Message::PracticeReviewCommitted {
+                card_generation,
+                was_manual_override,
+                result,
+            } => {
+                if card_generation != self.practice_state.card_generation {
+                    return Task::none();
+                }
+                self.practice_state.is_committing = false;
+                match result {
+                    Ok((outcome, streak, latest_pitch)) => {
+                        self.streak = streak;
+                        if let Some(pitch_err) = latest_pitch
+                            && let Some(card) = self.practice_state.current_card()
+                        {
+                            let card_id = card.card_id;
+                            for loaded in &mut self.loaded_cards {
+                                if loaded.card_id == card_id {
+                                    loaded.last_pitch_error_percent = Some(pitch_err);
+                                }
+                            }
+                            for queued in &mut self.practice_state.queue {
+                                if queued.card_id == card_id {
+                                    queued.last_pitch_error_percent = Some(pitch_err);
+                                }
+                            }
+                        }
+
+                        let eval_snapshot = self.practice_state.last_evaluation.clone();
+                        self.practice_state.record_committed_card(
+                            eval_snapshot.as_ref(),
+                            was_manual_override,
+                            outcome.applied_rating,
+                        );
+                        self.practice_state.current_index =
+                            self.practice_state.current_index.saturating_add(1);
+
+                        if !self.practice_state.cap_override_active
+                            && self.streak.is_daily_goal_met()
+                        {
+                            self.practice_state.summary.daily_cap_reached = true;
+                            self.practice_state.phase = PracticePhase::SessionComplete {
+                                cap_reached: true,
+                            };
+                            self.practice_state.card_started_at = None;
+                            return Task::none();
+                        }
+
+                        if self.practice_state.current_index >= self.practice_state.queue.len() {
+                            self.practice_state.phase = PracticePhase::SessionComplete {
+                                cap_reached: false,
+                            };
+                            self.practice_state.card_started_at = None;
+                            return Task::none();
+                        }
+
+                        self.practice_state
+                            .prepare_current_card(self.active_mode, self.settings.blind_mode);
+                        return self.launch_active_card_background_tasks();
+                    }
+                    Err(err_msg) => {
+                        let err = anyhow::anyhow!(err_msg);
+                        self.report_error(
+                            "Could Not Save Review",
+                            &err,
+                            Some("Ensure your local Kotodama database is writable and retry rating.".to_string()),
+                        );
+                    }
+                }
+            }
+            Message::PracticeCardContextLoaded {
+                card_generation,
+                result,
+            } => {
+                if card_generation != self.practice_state.card_generation {
+                    return Task::none();
+                }
+                if let Ok((state, previews)) = result {
+                    self.practice_state.current_fsrs_state = state;
+                    self.practice_state.preview_intervals_days = Some(previews);
+                }
+            }
+            Message::PracticeSkipCard => {
+                if self.practice_state.phase != PracticePhase::ActiveCard
+                    || self.practice_state.is_committing
+                {
+                    return Task::none();
+                }
+                self.stop_practice_audio_and_countdown();
+                self.practice_state.current_index =
+                    self.practice_state.current_index.saturating_add(1);
+                if self.practice_state.current_index >= self.practice_state.queue.len() {
+                    self.practice_state.phase = PracticePhase::SessionComplete {
+                        cap_reached: false,
+                    };
+                    self.practice_state.card_started_at = None;
+                    return Task::none();
+                }
+                self.practice_state
+                    .prepare_current_card(self.active_mode, self.settings.blind_mode);
+                return self.launch_active_card_background_tasks();
+            }
+            Message::PracticeKeyShortcut(action) => {
+                return self.handle_practice_shortcut(action);
+            }
+            Message::PracticeSessionTick => {
+                if self.practice_state.phase == PracticePhase::ActiveCard {
+                    self.practice_state.session_elapsed_ms =
+                        self.practice_state.session_elapsed_ms.saturating_add(1000);
+                    if !self.practice_state.cap_override_active
+                        && matches!(self.streak.daily_goal, DailyGoal::Minutes(_))
+                    {
+                        let effective_minutes = self
+                            .practice_state
+                            .effective_today_minutes(self.streak.minutes_practiced_today);
+                        if let DailyGoal::Minutes(goal) = self.streak.daily_goal
+                            && effective_minutes >= goal
+                        {
+                            let added = self.practice_state.take_newly_elapsed_minutes();
+                            if added > 0 {
+                                self.streak.minutes_practiced_today =
+                                    self.streak.minutes_practiced_today.saturating_add(added);
+                                if let Some(db_path) = self.db_path.as_deref()
+                                    && let Ok(db) = KotodamaDb::open(db_path)
+                                {
+                                    let _ = db.save_daily_streak(&self.streak);
+                                }
+                            }
+                            self.stop_practice_audio_and_countdown();
+                            self.practice_state.summary.session_duration_ms =
+                                self.practice_state.session_elapsed_ms;
+                            self.practice_state.summary.daily_cap_reached = true;
+                            self.practice_state.phase = PracticePhase::SessionComplete {
+                                cap_reached: true,
+                            };
+                            self.practice_state.card_started_at = None;
+                        }
+                    }
+                }
+            }
             Message::TriggerSampleError => {
                 let err = anyhow::anyhow!(
                     "Could not open collection.anki2: no deck file has been selected yet."
@@ -1416,6 +1766,580 @@ impl KotodamaApp {
                     &err,
                     Some("Check your microphone connection and try recording again.".to_string()),
                 );
+            }
+        }
+    }
+
+    fn stop_practice_audio_and_countdown(&mut self) {
+        if let Some(session) = self.practice_recording.take() {
+            drop(session);
+        }
+        self.practice_mic_level = MicLevelSnapshot::default();
+        self.practice_state.cancel_countdown();
+        self.practice_state.is_playing_reference = false;
+        self.practice_state.is_playing_user_take = false;
+    }
+
+    fn resolve_active_media_dir(&self) -> Option<PathBuf> {
+        if let Some(active) = &self.deck_workspace.active_deck
+            && let crate::models::DeckSource::LocalCollection { media_dir, .. } = &active.source
+            && !media_dir.as_os_str().is_empty()
+        {
+            return Some(media_dir.clone());
+        }
+        self.setup_state.effective_media_dir()
+    }
+
+    fn resolve_practice_card_audio_path(
+        &self,
+        card: &AnkiCard,
+        clip: PracticeTargetClip,
+    ) -> anyhow::Result<PathBuf> {
+        let media_dir = self
+            .resolve_active_media_dir()
+            .ok_or_else(|| anyhow::anyhow!("Media directory path is not configured."))?;
+        let filename = match clip {
+            PracticeTargetClip::Sentence => card
+                .sentence_audio
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&card.word_audio),
+            PracticeTargetClip::Word => card.word_audio.as_str(),
+        };
+        validator::resolve_media_path(&media_dir, filename)
+            .ok_or_else(|| anyhow::anyhow!("Card '{}' has no valid audio filename for {}.", card.display_label(), clip.label()))
+    }
+
+    fn handle_practice_start_session(&mut self, extra_study: bool) -> Task<Message> {
+        if self.deck_workspace.active_deck.is_none() && self.loaded_cards.is_empty() {
+            self.report_warning(
+                "No Anki Deck Connected",
+                "Connect and validate an Anki deck in Setup before starting practice.",
+                Some("Open the Setup tab, map your fields, and click Validate Audio & Save Deck.".to_string()),
+            );
+            return Task::none();
+        }
+
+        self.stop_mic_activity();
+        self.stop_practice_audio_and_countdown();
+
+        let active_deck = self.deck_workspace.active_deck.clone();
+        let existing_cards = self.loaded_cards.clone();
+        let deck_name = self
+            .active_or_selected_deck_name()
+            .map(str::to_string)
+            .unwrap_or_default();
+        let workspace = self.deck_workspace.clone();
+        let db_path = self
+            .db_path
+            .clone()
+            .or_else(|| storage::default_database_path().ok());
+
+        self.practice_state.extra_study_mode = extra_study;
+        self.practice_state.phase = PracticePhase::Loading {
+            label: if extra_study {
+                "Preparing extra study cards...".to_string()
+            } else {
+                "Loading due FSRS pronunciation queue...".to_string()
+            },
+        };
+
+        Task::perform(
+            run_blocking(move || {
+                let mut cards = existing_cards;
+                let mut discovered_media: Option<PathBuf> = None;
+
+                if cards.is_empty()
+                    && let Some(deck) = active_deck.as_ref()
+                {
+                    cards = reader::import_learned_cards(
+                        &deck.source,
+                        &deck.deck_name,
+                        &deck.field_mapping,
+                    )?;
+                    let media_dir = match &deck.source {
+                        crate::models::DeckSource::LocalCollection { media_dir, .. } => {
+                            Some(media_dir.clone())
+                        }
+                        crate::models::DeckSource::AnkiConnect { endpoint_url } => {
+                            reader::inspect_ankiconnect(endpoint_url)
+                                .ok()
+                                .and_then(|(_, dir)| dir)
+                        }
+                    };
+                    if let Some(ref dir) = media_dir {
+                        let _ = validator::validate_deck_cards(&mut cards, dir);
+                    }
+                    discovered_media = media_dir;
+                }
+
+                let active_ids: Vec<i64> = workspace
+                    .filter_active_cards(&deck_name, &cards)
+                    .into_iter()
+                    .map(|card| card.card_id)
+                    .collect();
+
+                if let Some(db_path) = db_path {
+                    let db = KotodamaDb::open(&db_path)?;
+                    let latest_pitch = db.latest_pitch_errors_by_card()?;
+                    let ordered_ids = if extra_study {
+                        active_ids
+                    } else {
+                        db.list_due_card_ids(&active_ids, Utc::now())?
+                    };
+                    let (first_fsrs, first_previews) = if let Some(&first_id) = ordered_ids.first() {
+                        load_card_fsrs_context(&db_path, first_id)?
+                    } else {
+                        (None, [1, 1, 2, 4])
+                    };
+                    Ok((
+                        cards,
+                        ordered_ids,
+                        latest_pitch,
+                        discovered_media,
+                        first_fsrs,
+                        first_previews,
+                    ))
+                } else {
+                    Ok((
+                        cards,
+                        active_ids,
+                        BTreeMap::new(),
+                        discovered_media,
+                        None,
+                        [1, 1, 2, 4],
+                    ))
+                }
+            }),
+            Message::PracticeDeckPrepared,
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn handle_practice_deck_prepared(
+        &mut self,
+        result: Result<
+            (
+                Vec<AnkiCard>,
+                Vec<i64>,
+                BTreeMap<i64, f32>,
+                Option<PathBuf>,
+                Option<FsrsCardState>,
+                [u32; 4],
+            ),
+            String,
+        >,
+    ) -> Task<Message> {
+        if !matches!(self.practice_state.phase, PracticePhase::Loading { .. }) {
+            return Task::none();
+        }
+
+        match result {
+            Ok((
+                mut cards,
+                ordered_ids,
+                latest_pitch,
+                discovered_media,
+                first_fsrs,
+                first_previews,
+            )) => {
+                for card in &mut cards {
+                    if let Some(&pitch_err) = latest_pitch.get(&card.card_id) {
+                        card.last_pitch_error_percent = Some(pitch_err);
+                    }
+                }
+                self.loaded_cards = cards;
+
+                if self.setup_state.media_dir_input.trim().is_empty()
+                    && let Some(dir) = discovered_media
+                {
+                    self.setup_state.media_dir_input = dir.display().to_string();
+                }
+
+                let active_cards = self.active_practice_cards();
+                if active_cards.is_empty() {
+                    self.practice_state.reset_to_lobby();
+                    self.report_warning(
+                        "No Active Cards Available",
+                        "All learned cards in this deck are excluded or none were found.",
+                        Some("Restore excluded cards or validate another deck in Setup.".to_string()),
+                    );
+                    return Task::none();
+                }
+
+                let by_id: BTreeMap<i64, AnkiCard> = active_cards
+                    .into_iter()
+                    .map(|card| (card.card_id, card.clone()))
+                    .collect();
+                let queue: Vec<AnkiCard> = ordered_ids
+                    .into_iter()
+                    .filter_map(|id| by_id.get(&id).cloned())
+                    .collect();
+
+                if queue.is_empty() {
+                    self.practice_state.begin_session(
+                        Vec::new(),
+                        self.active_mode,
+                        self.settings.blind_mode,
+                        false,
+                        Some(0),
+                    );
+                    return Task::none();
+                }
+
+                let extra_study = self.practice_state.extra_study_mode;
+                let due_hint = Some(queue.len());
+                self.practice_state.begin_session(
+                    queue,
+                    self.active_mode,
+                    self.settings.blind_mode,
+                    extra_study,
+                    due_hint,
+                );
+                self.practice_state.current_fsrs_state = first_fsrs;
+                self.practice_state.preview_intervals_days = Some(first_previews);
+                self.launch_reference_decode_task()
+            }
+            Err(err_msg) => {
+                self.practice_state.reset_to_lobby();
+                let err = anyhow::anyhow!(err_msg);
+                self.report_error(
+                    "Could Not Start Practice Session",
+                    &err,
+                    Some("Check your Anki source and database settings in Setup.".to_string()),
+                );
+                Task::none()
+            }
+        }
+    }
+
+    fn launch_active_card_background_tasks(&mut self) -> Task<Message> {
+        let decode_task = self.launch_reference_decode_task();
+        let Some(card) = self.practice_state.current_card() else {
+            return decode_task;
+        };
+        let card_id = card.card_id;
+        let card_generation = self.practice_state.card_generation;
+        let Some(db_path) = self
+            .db_path
+            .clone()
+            .or_else(|| storage::default_database_path().ok())
+        else {
+            return decode_task;
+        };
+
+        let fsrs_task = Task::perform(
+            run_blocking(move || load_card_fsrs_context(&db_path, card_id)),
+            move |result| Message::PracticeCardContextLoaded {
+                card_generation,
+                result,
+            },
+        );
+        Task::batch([decode_task, fsrs_task])
+    }
+
+    fn launch_reference_decode_task(&mut self) -> Task<Message> {
+        let Some(card) = self.practice_state.current_card().cloned() else {
+            return Task::none();
+        };
+        let generation = self.practice_state.card_generation;
+        let clip = self.practice_state.target_clip;
+
+        match self.resolve_practice_card_audio_path(&card, clip) {
+            Ok(audio_path) => {
+                self.practice_state.is_decoding_reference = true;
+                self.practice_state.reference_audio_error = None;
+                Task::perform(
+                    run_blocking(move || decode_reference_with_contour(&audio_path)),
+                    move |result| Message::PracticeReferenceDecoded { generation, result },
+                )
+            }
+            Err(err) => {
+                self.practice_state.is_decoding_reference = false;
+                self.practice_state.reference_audio_error = Some(format!("{err:#}"));
+                Task::none()
+            }
+        }
+    }
+
+    fn handle_practice_play_reference(&mut self) -> Task<Message> {
+        let Some(card) = self.practice_state.current_card().cloned() else {
+            return Task::none();
+        };
+        let generation = self.practice_state.card_generation;
+        let speed = self.settings.playback_speed;
+
+        if let Some(decoded) = self.practice_state.reference_audio.clone() {
+            self.practice_state.is_playing_reference = true;
+            return Task::perform(
+                run_blocking(move || playback::play_decoded_audio(decoded, speed)),
+                move |result| Message::PracticeReferencePlaybackFinished { generation, result },
+            );
+        }
+
+        match self.resolve_practice_card_audio_path(&card, self.practice_state.target_clip) {
+            Ok(audio_path) => {
+                self.practice_state.is_playing_reference = true;
+                Task::perform(
+                    run_blocking(move || playback::play_audio_file_at_speed(&audio_path, speed)),
+                    move |result| Message::PracticeReferencePlaybackFinished { generation, result },
+                )
+            }
+            Err(err) => {
+                self.practice_state.awaiting_shadow_countdown = false;
+                self.report_error(
+                    "Reference Audio Unavailable",
+                    &err,
+                    Some("Verify your collection.media path in Setup or skip this card.".to_string()),
+                );
+                Task::none()
+            }
+        }
+    }
+
+    fn start_practice_recording(&mut self) {
+        if self.practice_recording.is_some() {
+            return;
+        }
+        let vad_config = VadConfig::from_settings(&self.settings);
+        match RecordingSession::start(
+            self.settings.preferred_input_device.as_deref(),
+            vad_config,
+        ) {
+            Ok(session) => {
+                self.practice_mic_level = session.snapshot();
+                self.practice_recording = Some(session);
+            }
+            Err(err) => {
+                self.report_error(
+                    "Could Not Start Recording",
+                    &err,
+                    Some("Check your microphone connection and Settings calibration, then press R again.".to_string()),
+                );
+            }
+        }
+    }
+
+    fn finalize_practice_recording(&mut self, session: RecordingSession) -> Task<Message> {
+        self.practice_mic_level = MicLevelSnapshot::default();
+        match session.finish() {
+            Ok(take) => {
+                self.practice_state.text_revealed = true;
+                self.practice_state.take_generation =
+                    self.practice_state.take_generation.saturating_add(1);
+                let take_generation = self.practice_state.take_generation;
+
+                let scored_audio = if take.trimmed_audio.samples.is_empty() {
+                    take.raw_audio.clone()
+                } else {
+                    take.trimmed_audio.clone()
+                };
+                self.practice_state.last_take = Some(take.clone());
+
+                if !take.speech_detected || scored_audio.samples.is_empty() {
+                    self.report_warning(
+                        "No Speech Above VAD Threshold",
+                        "No frames crossed the VAD speech threshold during your recording.",
+                        Some("Speak a little louder or lower the VAD sensitivity slider in Settings.".to_string()),
+                    );
+                    return Task::none();
+                }
+
+                let Some(card) = self.practice_state.current_card().cloned() else {
+                    return Task::none();
+                };
+                let mode = self.active_mode;
+                let thresholds = self.settings.score_thresholds.clone();
+                let ref_audio = self.practice_state.reference_audio.clone();
+                let ref_path = self
+                    .resolve_practice_card_audio_path(&card, self.practice_state.target_clip)
+                    .ok();
+                let duration_ms = self
+                    .practice_state
+                    .card_started_at
+                    .map_or(scored_audio.duration_ms(), |started| {
+                        started.elapsed().as_millis().max(1) as u64
+                    });
+
+                self.practice_state.is_scoring = true;
+                Task::perform(
+                    run_blocking(move || {
+                        evaluate_practice_take(
+                            &card,
+                            mode,
+                            scored_audio,
+                            ref_audio,
+                            ref_path,
+                            &thresholds,
+                            duration_ms,
+                        )
+                    }),
+                    move |result| Message::PracticeTakeEvaluated {
+                        take_generation,
+                        result,
+                    },
+                )
+            }
+            Err(err) => {
+                self.report_error(
+                    "Recording Failed",
+                    &err,
+                    Some("Check your microphone connection and press R to try again.".to_string()),
+                );
+                Task::none()
+            }
+        }
+    }
+
+    fn handle_practice_submit_rating(
+        &mut self,
+        rating: FsrsRating,
+        is_manual: bool,
+    ) -> Task<Message> {
+        if self.practice_state.phase != PracticePhase::ActiveCard
+            || self.practice_state.is_committing
+        {
+            return Task::none();
+        }
+        self.stop_practice_audio_and_countdown();
+
+        let Some(card) = self.practice_state.current_card().cloned() else {
+            return Task::none();
+        };
+        let card_generation = self.practice_state.card_generation;
+        let thresholds = self.settings.score_thresholds.clone();
+        let daily_goal = self.settings.daily_goal;
+
+        let (breakdown, mora_attempts, dtw_distance, duration_ms, latest_pitch) =
+            if let Some(eval) = &self.practice_state.last_evaluation {
+                (
+                    eval.breakdown.clone(),
+                    eval.mora_evaluation
+                        .as_ref()
+                        .map(|m| m.attempts.clone())
+                        .unwrap_or_default(),
+                    eval.pitch_analysis.as_ref().map(|p| p.dtw_distance),
+                    eval.duration_ms,
+                    eval.pitch_analysis.as_ref().map(|p| p.pitch_error_percent),
+                )
+            } else {
+                let score_percent = manual_rating_score_percent(rating, &thresholds);
+                let mode = self.active_mode;
+                let fallback_breakdown = crate::models::CombinedScoreBreakdown {
+                    mode,
+                    mora_accuracy_percent: None,
+                    pitch_accuracy_percent: None,
+                    pitch_error_percent: None,
+                    combined_score_percent: score_percent,
+                    recommended_rating: rating,
+                };
+                let elapsed = self
+                    .practice_state
+                    .card_started_at
+                    .map_or(1000, |t| t.elapsed().as_millis().max(1) as u64);
+                (fallback_breakdown, Vec::new(), None, elapsed, None)
+            };
+
+        let was_manual_override = is_manual && rating != breakdown.recommended_rating;
+        let streak_minutes_to_add = self.practice_state.take_newly_elapsed_minutes();
+
+        let db_path = match self
+            .db_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Local database path is unavailable."))
+            .or_else(|_| storage::default_database_path())
+        {
+            Ok(path) => path,
+            Err(err) => {
+                self.report_error(
+                    "Database Unavailable",
+                    &err,
+                    Some("Ensure your system data directory is writable.".to_string()),
+                );
+                return Task::none();
+            }
+        };
+
+        self.practice_state.is_committing = true;
+        Task::perform(
+            run_blocking(move || {
+                let mut db = KotodamaDb::open(&db_path)?;
+                let scheduler = FsrsScheduler::default_scheduler()?;
+                let (_review_id, outcome, streak) = scheduler.record_review_with_streak_minutes(
+                    &mut db,
+                    &card,
+                    &breakdown,
+                    &mora_attempts,
+                    &thresholds,
+                    Some(rating),
+                    dtw_distance,
+                    duration_ms,
+                    streak_minutes_to_add,
+                    daily_goal,
+                    Utc::now(),
+                )?;
+                Ok((outcome, streak, latest_pitch))
+            }),
+            move |result| Message::PracticeReviewCommitted {
+                card_generation,
+                was_manual_override,
+                result,
+            },
+        )
+    }
+
+    fn handle_practice_shortcut(&mut self, action: PracticeShortcutAction) -> Task<Message> {
+        match action {
+            PracticeShortcutAction::ToggleBlindMode => {
+                return self.update(Message::ToggleBlindMode(!self.settings.blind_mode));
+            }
+            PracticeShortcutAction::TogglePlaybackSpeed => {
+                let next_speed = if self.settings.playback_speed == PlaybackSpeed::Slow {
+                    PlaybackSpeed::Normal
+                } else {
+                    PlaybackSpeed::Slow
+                };
+                return self.update(Message::SelectPlaybackSpeed(next_speed));
+            }
+            _ => {}
+        }
+
+        if self.practice_state.phase != PracticePhase::ActiveCard {
+            return Task::none();
+        }
+
+        match action {
+            PracticeShortcutAction::PlayReference => self.update(Message::PracticePlayReference),
+            PracticeShortcutAction::ToggleRecord => self.update(Message::PracticeToggleRecording),
+            PracticeShortcutAction::PlayUserTake => self.update(Message::PracticePlayUserTake),
+            PracticeShortcutAction::RateCard(rating) => self.update(Message::PracticeSubmitRating {
+                rating,
+                is_manual: true,
+            }),
+            PracticeShortcutAction::AcceptRecommended => {
+                if let Some(rating) = self
+                    .practice_state
+                    .last_evaluation
+                    .as_ref()
+                    .map(|eval| eval.breakdown.recommended_rating)
+                {
+                    return self.update(Message::PracticeSubmitRating {
+                        rating,
+                        is_manual: false,
+                    });
+                }
+                Task::none()
+            }
+            PracticeShortcutAction::CancelActive => {
+                if let Some(session) = self.practice_recording.take() {
+                    drop(session);
+                    self.practice_mic_level = MicLevelSnapshot::default();
+                }
+                self.practice_state.cancel_countdown();
+                Task::none()
+            }
+            PracticeShortcutAction::ToggleBlindMode | PracticeShortcutAction::TogglePlaybackSpeed => {
+                Task::none()
             }
         }
     }
@@ -1679,6 +2603,17 @@ impl KotodamaApp {
             )
         });
 
+        let minute_goal_presets =
+            [5_u32, 10, 15].into_iter().fold(row![].spacing(10), |r, minutes| {
+                let selected = self.settings.daily_goal == DailyGoal::Minutes(minutes);
+                r.push(
+                    button(text(format!("{minutes} min")).size(14))
+                        .padding([8, 14])
+                        .style(theme::pill_button_style(selected))
+                        .on_press(Message::SetDailyGoalMinutes(minutes)),
+                )
+            });
+
         let ergonomics_card = container(
             column![
                 text("Practice Ergonomics").size(18).color(colors.text_primary),
@@ -1701,6 +2636,7 @@ impl KotodamaApp {
                 column![
                     text("Daily Session Goal").size(14).color(colors.text_muted),
                     goal_presets,
+                    minute_goal_presets,
                 ]
                 .spacing(8),
             ]
@@ -2198,6 +3134,129 @@ impl canvas::Program<Message> for MicMeterProgram {
         );
 
         vec![frame.into_geometry()]
+    }
+}
+
+fn practice_keyboard_event(
+    event: iced::Event,
+    status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    if status == iced::event::Status::Captured {
+        return None;
+    }
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+        key,
+        physical_key,
+        modifiers,
+        repeat: false,
+        ..
+    }) = event
+    else {
+        return None;
+    };
+    practice::map_key_to_shortcut(&key, physical_key, modifiers).map(Message::PracticeKeyShortcut)
+}
+
+fn decode_reference_with_contour(
+    audio_path: &std::path::Path,
+) -> anyhow::Result<(DecodedAudio, Option<ReferenceContourPreview>)> {
+    let decoded = playback::decode_audio_file(audio_path)?;
+    let contour = dsp::extract_f0_contour(&decoded, &PitchExtractionConfig::default())
+        .ok()
+        .and_then(|f0| dsp::normalize_to_semitones(&f0).ok())
+        .map(|(semitones, median_hz)| ReferenceContourPreview {
+            semitones,
+            median_hz,
+        });
+    Ok((decoded, contour))
+}
+
+fn load_card_fsrs_context(
+    db_path: &std::path::Path,
+    card_id: i64,
+) -> anyhow::Result<(Option<FsrsCardState>, [u32; 4])> {
+    let db = KotodamaDb::open(db_path)?;
+    let existing = db.get_fsrs_state(card_id)?;
+    let scheduler = FsrsScheduler::default_scheduler()?;
+    let previews = scheduler.preview_next_intervals(existing.as_ref(), Utc::now())?;
+    Ok((existing, previews))
+}
+
+fn evaluate_practice_take(
+    card: &AnkiCard,
+    mode: PracticeMode,
+    scored_audio: DecodedAudio,
+    reference_audio: Option<DecodedAudio>,
+    reference_path: Option<PathBuf>,
+    thresholds: &ScoreThresholds,
+    duration_ms: u64,
+) -> anyhow::Result<PracticeEvaluationResult> {
+    let now = Utc::now();
+    let reference = match reference_audio {
+        Some(audio) => Some(audio),
+        None => match reference_path {
+            Some(path) if path.is_file() => Some(playback::decode_audio_file(&path)?),
+            _ => None,
+        },
+    };
+
+    let mora_evaluation = match mode {
+        PracticeMode::MoraPurity | PracticeMode::CombinedShadowing => {
+            Some(HeuristicAcousticMoraScorer.score_morae(&crate::models::MoraScoreRequest {
+                card_id: card.card_id,
+                target_kana_sequence: card.kana.clone(),
+                user_audio: scored_audio.clone(),
+                reference_audio: reference.clone(),
+                recorded_at: now,
+            })?)
+        }
+        PracticeMode::PitchAccent => None,
+    };
+
+    let pitch_analysis = match mode {
+        PracticeMode::PitchAccent | PracticeMode::CombinedShadowing => {
+            let ref_buf = reference.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Reference audio is unavailable for '{}'; check collection.media.",
+                    card.display_label()
+                )
+            })?;
+            Some(pitch::score_pitch(
+                ref_buf,
+                &scored_audio,
+                &PitchExtractionConfig::default(),
+            )?)
+        }
+        PracticeMode::MoraPurity => None,
+    };
+
+    let breakdown = pitch::combine_practice_score(
+        mode,
+        mora_evaluation
+            .as_ref()
+            .map(|m| m.mora_accuracy_percent),
+        pitch_analysis.as_ref().map(|p| p.pitch_error_percent),
+        thresholds,
+    )?;
+
+    Ok(PracticeEvaluationResult {
+        card_id: card.card_id,
+        mode,
+        mora_evaluation,
+        pitch_analysis,
+        breakdown,
+        duration_ms,
+        evaluated_at: now,
+    })
+}
+
+fn manual_rating_score_percent(rating: FsrsRating, thresholds: &ScoreThresholds) -> f32 {
+    match rating {
+        FsrsRating::Again => (thresholds.hard_min * 0.5).clamp(0.0, 100.0),
+        FsrsRating::Hard => ((thresholds.hard_min + thresholds.good_min) * 0.5).clamp(0.0, 100.0),
+        FsrsRating::Good => ((thresholds.good_min + thresholds.easy_min) * 0.5).clamp(0.0, 100.0),
+        FsrsRating::Easy => ((thresholds.easy_min + 100.0) * 0.5).clamp(0.0, 100.0),
     }
 }
 
@@ -2724,5 +3783,221 @@ mod tests {
         let _ = app.update(Message::JsonExportCompleted(Err("Disk full".to_string())));
         assert_eq!(app.toasts.len(), 2);
         assert!(app.toasts.iter().all(|t| t.severity == ErrorSeverity::Error));
+    }
+
+    fn sample_practice_card(card_id: i64, word: &str, kana: &str) -> AnkiCard {
+        AnkiCard {
+            card_id,
+            note_id: card_id * 10,
+            deck_name: "Core 2k".to_string(),
+            word: word.to_string(),
+            kana: kana.to_string(),
+            sentence: Some(format!("{word}の例文")),
+            word_audio: format!("word_{card_id}.mp3"),
+            sentence_audio: Some(format!("sent_{card_id}.mp3")),
+            anki_queue: AnkiCard::LEARNED_QUEUE,
+            audio_issues: Vec::new(),
+            last_pitch_error_percent: None,
+        }
+    }
+
+    #[test]
+    fn practice_shortcuts_toggle_blind_speed_and_cancel_countdown() {
+        let mut app = KotodamaApp::default();
+        assert!(!app.settings.blind_mode);
+        assert_eq!(app.settings.playback_speed, PlaybackSpeed::Normal);
+
+        let _ = app.update(Message::PracticeKeyShortcut(
+            PracticeShortcutAction::ToggleBlindMode,
+        ));
+        let _ = app.update(Message::PracticeKeyShortcut(
+            PracticeShortcutAction::TogglePlaybackSpeed,
+        ));
+        assert!(app.settings.blind_mode);
+        assert_eq!(app.settings.playback_speed, PlaybackSpeed::Slow);
+
+        app.practice_state.begin_session(
+            vec![sample_practice_card(1, "水", "みず")],
+            PracticeMode::CombinedShadowing,
+            true,
+            false,
+            Some(1),
+        );
+        assert!(!app.practice_state.text_revealed);
+
+        app.practice_state.start_countdown(Instant::now());
+        assert!(app.practice_state.countdown.is_some());
+
+        let _ = app.update(Message::PracticeKeyShortcut(
+            PracticeShortcutAction::CancelActive,
+        ));
+        assert!(app.practice_state.countdown.is_none());
+
+        let _ = app.update(Message::PracticeRevealText);
+        assert!(app.practice_state.text_revealed);
+
+        let _ = app.update(Message::PracticeKeyShortcut(
+            PracticeShortcutAction::ToggleBlindMode,
+        ));
+        assert!(!app.settings.blind_mode);
+    }
+
+    #[test]
+    fn practice_daily_goal_minutes_and_card_cap_enforce_and_allow_extra_override() -> anyhow::Result<()> {
+        let (dir, settings_path, deck_path) = temp_config_paths("practice_cap");
+        let mut app = KotodamaApp::with_config_paths(settings_path.clone(), deck_path);
+
+        let _ = app.update(Message::SetDailyGoalMinutes(5));
+        assert_eq!(app.settings.daily_goal, DailyGoal::Minutes(5));
+        assert_eq!(app.streak.daily_goal, DailyGoal::Minutes(5));
+        assert_eq!(storage::load_settings(&settings_path)?.daily_goal, DailyGoal::Minutes(5));
+
+        app.practice_state.begin_session(
+            vec![
+                sample_practice_card(1, "橋", "はし"),
+                sample_practice_card(2, "雨", "あめ"),
+            ],
+            PracticeMode::PitchAccent,
+            false,
+            false,
+            Some(2),
+        );
+        app.practice_state.session_elapsed_ms = 299_000;
+        let _ = app.update(Message::PracticeSessionTick);
+        assert_eq!(
+            app.practice_state.phase,
+            PracticePhase::SessionComplete { cap_reached: true }
+        );
+        assert!(app.practice_state.summary.daily_cap_reached);
+
+        let _ = app.update(Message::PracticeContinueExtra);
+        assert!(app.practice_state.cap_override_active);
+        assert_eq!(app.practice_state.phase, PracticePhase::ActiveCard);
+
+        let mut db = KotodamaDb::open_in_memory()?;
+        let scheduler = FsrsScheduler::default_scheduler()?;
+        let breakdown = pitch::combine_practice_score(
+            PracticeMode::PitchAccent,
+            None,
+            Some(12.0),
+            &app.settings.score_thresholds,
+        )?;
+        let card = sample_practice_card(1, "橋", "はし");
+        let (_id, outcome, mut streak) = scheduler.record_review_with_streak_minutes(
+            &mut db,
+            &card,
+            &breakdown,
+            &[],
+            &app.settings.score_thresholds,
+            Some(FsrsRating::Good),
+            Some(0.72),
+            3500,
+            0,
+            DailyGoal::Cards(1),
+            Utc::now(),
+        )?;
+        streak.daily_goal = DailyGoal::Cards(1);
+        app.streak.daily_goal = DailyGoal::Cards(1);
+        app.practice_state.cap_override_active = false;
+        let card_generation = app.practice_state.card_generation;
+        let _ = app.update(Message::PracticeReviewCommitted {
+            card_generation,
+            was_manual_override: false,
+            result: Ok((outcome, streak, Some(12.0))),
+        });
+        assert_eq!(
+            app.practice_state.phase,
+            PracticePhase::SessionComplete { cap_reached: true }
+        );
+        assert_eq!(app.practice_state.summary.cards_completed, 1);
+
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn practice_deck_prepared_and_error_paths_handle_missing_or_failed_inputs_gracefully() {
+        let mut app = KotodamaApp::default();
+
+        let _ = app.update(Message::PracticeStartSession { extra_study: false });
+        assert_eq!(app.practice_state.phase, PracticePhase::Lobby);
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].severity, ErrorSeverity::Warning);
+
+        let _ = app.update(Message::ClearAllToasts);
+        app.setup_state.selected_deck_name = Some("Core 2k".to_string());
+        app.practice_state.phase = PracticePhase::Loading {
+            label: "Loading...".to_string(),
+        };
+        let card = sample_practice_card(10, "靴", "くつ");
+        let _ = app.update(Message::PracticeDeckPrepared(Ok((
+            vec![card.clone()],
+            vec![10],
+            BTreeMap::from([(10, 14.5)]),
+            None,
+            None,
+            [1, 1, 2, 4],
+        ))));
+        assert_eq!(app.practice_state.phase, PracticePhase::ActiveCard);
+        assert_eq!(
+            app.practice_state
+                .current_card()
+                .and_then(|c| c.last_pitch_error_percent),
+            Some(14.5)
+        );
+        assert!(app.practice_state.reference_audio_error.is_some());
+
+        let _ = app.update(Message::PracticePlayUserTake);
+        assert_eq!(app.toasts.len(), 1);
+
+        let take_gen = app.practice_state.take_generation;
+        let _ = app.update(Message::PracticeTakeEvaluated {
+            take_generation: take_gen,
+            result: Err("No voiced pitch frames detected".to_string()),
+        });
+        assert_eq!(app.toasts.len(), 2);
+        assert_eq!(app.toasts[1].severity, ErrorSeverity::Error);
+
+        let card_gen = app.practice_state.card_generation;
+        let _ = app.update(Message::PracticeReviewCommitted {
+            card_generation: card_gen,
+            was_manual_override: false,
+            result: Err("SQLite database locked".to_string()),
+        });
+        assert_eq!(app.toasts.len(), 3);
+        assert_eq!(app.toasts[2].severity, ErrorSeverity::Error);
+    }
+
+    #[test]
+    fn practice_take_scoring_evaluates_synthetic_audio_across_all_modes() -> anyhow::Result<()> {
+        let rate = 16_000_u32;
+        let len = (rate / 2) as usize;
+        let make_tone = |freq: f32| DecodedAudio {
+            samples: (0..len)
+                .map(|i| (std::f32::consts::TAU * freq * i as f32 / rate as f32).sin() * 0.4)
+                .collect(),
+            sample_rate: rate,
+            channels: 1,
+        };
+        let ref_audio = make_tone(180.0);
+        let user_audio = make_tone(210.0);
+        let card = sample_practice_card(3, "水", "みず");
+        let thresholds = ScoreThresholds::default();
+
+        for mode in PracticeMode::ALL {
+            let eval = evaluate_practice_take(
+                &card,
+                mode,
+                user_audio.clone(),
+                Some(ref_audio.clone()),
+                None,
+                &thresholds,
+                500,
+            )?;
+            assert_eq!(eval.card_id, 3);
+            assert_eq!(eval.mode, mode);
+            assert!(eval.breakdown.combined_score_percent.is_finite());
+        }
+        Ok(())
     }
 }
