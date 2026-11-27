@@ -21,16 +21,16 @@
   - Tracks daily streaks, configurable daily goals (cards or minutes), accuracy over time, per-card pitch error %, and top-5 confusion matrices per kana (e.g., `つ: 82% correct — 5% す, 4% ず, 3% すう, 6% unknown`).
   - Exports session history, confusion matrices, and pitch error logs to **CSV** and **JSON**.
 
-## Current Status (`v0.3.0`)
+## Current Status (`v0.4.0`)
 
-Phase 3 (Audio Pipeline & DSP Engine) is complete:
-- Cross-platform `cpal` microphone capture (`src/audio/capture.rs`) with input device selection, live level monitoring, frame-RMS Voice Activity Detection (VAD) silence trimming, and automatic trailing-silence stop detection.
-- Pitch-preserving `0.75x` / `1.0x` WSOLA playback (`src/audio/playback.rs`) wired to both reference preview audio and recorded test takes.
-- Pure-Rust DSP pitch engine (`src/audio/dsp.rs`) performing YIN fundamental frequency (`F0`) extraction, speaker-median semitone normalization, and Dynamic Time Warping (DTW) pitch error scoring.
-- **Microphone & VAD Calibration** bar in Settings (`Canvas` live dBFS meter with coral VAD threshold marker, input device selector, test recording/playback, VAD sensitivity slider, and trailing silence presets).
-- Safe temporary-copy `collection.anki2` & live `AnkiConnect` ingestion (`queue = 2`), interactive 5-field Setup mapper, GIGO audio quality pre-flight checks, per-deck card exclusions, and adaptive Light/Dark mode.
+Phase 4 (Mora Scoring, FSRS Bridge & Local DB) is complete:
+- Local SQLite persistence (`src/storage/db.rs`) tracking daily streaks, review logs, per-kana confusion matrices, pitch error logs, and independent `fsrs` scheduling states without modifying Anki databases.
+- Pluggable `MoraScorer` trait and pure-Rust `HeuristicAcousticMoraScorer` (`src/scoring/mora.rs`) implementing Japanese allophone and high-vowel devoicing rules (が-row `[g]`/`[ŋ]`, devoiced high vowels holding a full mora beat, assimilated `ん` nasals, and `じ`/`ぢ` + `ず`/`づ` equivalence) plus top-5 confusion aggregation.
+- Combined scoring and FSRS bridge (`src/scoring/pitch.rs`, `src/scoring/fsrs_bridge.rs`) with interactive `Lenient`, `Balanced`, and `Strict` threshold presets in Settings and manual rating override support.
+- UTF-8 CSV and JSON exporters (`src/storage/export.rs`) wired to the Dashboard **Export CSV** and **Export JSON** buttons.
+- Cross-platform `cpal` microphone capture, VAD silence trimming/auto-stop, pitch-preserving `0.75x` / `1.0x` WSOLA playback, YIN `F0` + DTW pitch engine, safe `collection.anki2` / `AnkiConnect` ingestion (`queue = 2`), interactive 5-field Setup mapper, GIGO audio checks, per-deck exclusions, and adaptive Light/Dark mode.
 
-Upcoming phases add SQLite/FSRS scheduling & exporters (`v0.4.0`), interactive practice canvases (`v0.5.0`), and full analytics (`v0.6.0`).
+Upcoming phases add interactive Practice Canvases & keyboard-first drills (`v0.5.0`) and full Analytics Dashboard charts (`v0.6.0`).
 
 ## Connecting an Anki Deck & Mapping Fields
 

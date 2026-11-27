@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-26
+
+### Added
+- Official `fsrs` (`7.0.0`) and `csv` (`1.4.0`) crate dependencies for independent spaced-repetition scheduling and UTF-8 tabular exports.
+- Local SQLite persistence (`src/storage/db.rs` with `KotodamaDb` and `default_database_path` in `src/storage/mod.rs`) storing `daily_streak`, `fsrs_card_states`, `review_logs`, `mora_attempts`, and `kana_confusion_counts` with atomic review transactions and due-card queue ordering.
+- Pluggable mora clarity engine (`src/scoring/mora.rs`) defining the `MoraScorer` trait, pure-Rust `HeuristicAcousticMoraScorer`, katakana-to-hiragana normalization, yōon mora segmentation, top-5 mistake aggregation, and Japanese allophone/devoicing rules (が-row `[g]`/`[ŋ]`, high-vowel devoicing when voiceless consonants hold the full mora beat, assimilated `ん` nasals, and `じ`/`ぢ` + `ず`/`づ` equivalence).
+- Pitch scoring helper (`src/scoring/pitch.rs`) and FSRS scheduling bridge (`src/scoring/fsrs_bridge.rs`) combining mora and pitch metrics across practice modes, mapping scores via configurable `ScoreThresholds` presets (`Lenient`, `Balanced`, `Strict`), and supporting manual `1`–`4` rating overrides.
+- UTF-8 CSV and JSON exporters (`src/storage/export.rs`) generating `kotodama_review_history.csv`, `kotodama_kana_confusion.csv`, `kotodama_pitch_errors.csv`, and full `ExportBundle` JSON snapshots.
+- Centralized Phase 4 domain models in `src/models.rs` (`PhoneticRealization`, `MoraEquivalenceRule`, `MoraScoreRequest`, `MoraEvaluation`, `CombinedScoreBreakdown`, `ReviewLogEntry`, `PitchErrorLogEntry`, `DailyAccuracyPoint`, `FsrsSchedulingOutcome`, `ExportBundle`, `CsvExportReport`) plus `FsrsCardState::stability_fast` and DB serialization helpers.
+
+### Changed
+- Wired `KotodamaApp::boot` to initialize the local SQLite database and restore persisted `DailyStreak` progress safely.
+- Upgraded the Settings **FSRS Score Thresholds** card with interactive `Lenient`, `Balanced`, and `Strict` preset pills.
+- Wired Dashboard **Export CSV** and **Export JSON** buttons to native folder/file pickers (`rfd`) backed by `src/storage/export.rs` with live status feedback and recoverable error toasts.
+
 ## [0.3.0] - 2026-11-26
 
 ### Added

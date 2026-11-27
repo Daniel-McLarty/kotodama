@@ -18,7 +18,7 @@ Execute one phase at a time. Commit and push logically after each meaningful uni
   - Implement $F_0$ pitch extraction, semitone median normalization, and DTW pitch error % in `src/audio/dsp.rs` with synthetic sine-wave unit tests.
   - Add a Mic Calibration bar in Settings.
 
-- [ ] **Phase 4: Mora Scoring, FSRS Bridge & Local DB (`v0.4.0`)**
+- [x] **Phase 4: Mora Scoring, FSRS Bridge & Local DB (`v0.4.0`)**
   - Implement local SQLite schema in `src/storage/db.rs` for streaks, review logs, per-kana confusion counts, and independent FSRS states.
   - Implement `src/scoring/mora.rs` (pluggable scorer + top-5 mistakes aggregation) and `src/scoring/fsrs_bridge.rs` (configurable score-to-rating thresholds + manual override).
   - Implement CSV and JSON exporters in `src/storage/export.rs`.
