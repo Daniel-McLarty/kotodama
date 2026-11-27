@@ -5,7 +5,7 @@ use iced::theme::Palette;
 use iced::widget::{button, container, pick_list, slider, text_input};
 use iced::{Border, Color, Shadow, Theme, Vector, color};
 
-use crate::models::{ErrorSeverity, ResolvedTheme};
+use crate::models::{ErrorSeverity, FsrsRating, MoraChipTone, ResolvedTheme};
 
 /// Semantic color tokens shared across Kotodama's Light and Dark appearances.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -482,6 +482,126 @@ pub fn slider_style(theme: &Theme, status: slider::Status) -> slider::Style {
     }
 }
 
+/// Solid crimson button style used while actively recording microphone audio.
+pub fn recording_button_style(theme: &Theme, status: button::Status) -> button::Style {
+    let colors = tokens_for_theme(theme);
+    let background = match status {
+        button::Status::Active => colors.danger,
+        button::Status::Hovered | button::Status::Pressed => Color::from_rgba(
+            colors.danger.r,
+            colors.danger.g,
+            colors.danger.b,
+            0.88,
+        ),
+        button::Status::Disabled => colors.border,
+    };
+    let text_color = match status {
+        button::Status::Disabled => colors.text_muted,
+        _ => colors.primary_button_text,
+    };
+    button::Style {
+        background: Some(background.into()),
+        text_color,
+        border: Border {
+            color: colors.danger,
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
+/// Returns an adaptive button style closure for FSRS rating buttons, highlighting the recommended rating.
+pub fn rating_button_style(
+    rating: FsrsRating,
+    is_recommended: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let colors = tokens_for_theme(theme);
+        let (soft_bg, accent) = match rating {
+            FsrsRating::Again => (colors.danger_soft, colors.danger),
+            FsrsRating::Hard => (colors.amber_soft, colors.amber),
+            FsrsRating::Good => (colors.sage_soft, colors.sage),
+            FsrsRating::Easy => (colors.coral_soft, colors.coral),
+        };
+        let background = match (is_recommended, status) {
+            (_, button::Status::Disabled) => colors.card_muted,
+            (true, _) | (false, button::Status::Hovered | button::Status::Pressed) => soft_bg,
+            (false, button::Status::Active) => colors.card_surface,
+        };
+        let text_color = if matches!(status, button::Status::Disabled) {
+            colors.text_muted
+        } else if is_recommended {
+            accent
+        } else {
+            colors.text_primary
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color,
+            border: Border {
+                color: if is_recommended { accent } else { colors.border },
+                width: if is_recommended { 2.0 } else { 1.0 },
+                radius: 12.0.into(),
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
+/// Returns an adaptive chip button style closure for target and evaluated mora tokens.
+pub fn mora_chip_style(
+    tone: MoraChipTone,
+    is_selected: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let colors = tokens_for_theme(theme);
+        let (soft_bg, accent) = match tone {
+            MoraChipTone::Clear => (colors.sage_soft, colors.sage),
+            MoraChipTone::Mistake => (colors.danger_soft, colors.danger),
+            MoraChipTone::Neutral => {
+                if is_selected {
+                    (colors.coral_soft, colors.coral)
+                } else {
+                    (colors.card_muted, colors.border)
+                }
+            }
+        };
+        let background = match (tone, is_selected, status) {
+            (MoraChipTone::Neutral, false, button::Status::Hovered | button::Status::Pressed) => {
+                colors.coral_soft
+            }
+            _ => soft_bg,
+        };
+        let text_color = match tone {
+            MoraChipTone::Clear => colors.sage,
+            MoraChipTone::Mistake => colors.danger,
+            MoraChipTone::Neutral => {
+                if is_selected {
+                    colors.coral_text
+                } else {
+                    colors.text_primary
+                }
+            }
+        };
+        let border_color = if is_selected && tone == MoraChipTone::Neutral {
+            colors.coral
+        } else {
+            accent
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color,
+            border: Border {
+                color: border_color,
+                width: if is_selected { 2.0 } else { 1.0 },
+                radius: 12.0.into(),
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +671,27 @@ mod tests {
             let hovered_slider = slider_style(&theme, slider::Status::Hovered);
             assert_eq!(hovered_slider.handle.background, colors.coral_hover.into());
             assert_eq!(hovered_slider.handle.border_color, colors.card_surface);
+
+            let rec_btn = recording_button_style(&theme, button::Status::Active);
+            assert_eq!(rec_btn.background, Some(colors.danger.into()));
+            assert_eq!(rec_btn.text_color, colors.primary_button_text);
+
+            let good_rec = rating_button_style(FsrsRating::Good, true)(&theme, button::Status::Active);
+            assert_eq!(good_rec.border.color, colors.sage);
+            assert_eq!(good_rec.border.width, 2.0);
+            assert_eq!(good_rec.background, Some(colors.sage_soft.into()));
+
+            let hard_rest = rating_button_style(FsrsRating::Hard, false)(&theme, button::Status::Active);
+            assert_eq!(hard_rest.border.color, colors.border);
+            assert_eq!(hard_rest.background, Some(colors.card_surface.into()));
+
+            let clear_chip = mora_chip_style(MoraChipTone::Clear, false)(&theme, button::Status::Active);
+            assert_eq!(clear_chip.border.color, colors.sage);
+            assert_eq!(clear_chip.text_color, colors.sage);
+
+            let mistake_chip = mora_chip_style(MoraChipTone::Mistake, true)(&theme, button::Status::Active);
+            assert_eq!(mistake_chip.border.color, colors.danger);
+            assert_eq!(mistake_chip.border.width, 2.0);
         }
     }
 }
