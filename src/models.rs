@@ -534,6 +534,27 @@ impl PracticeMode {
             Self::CombinedShadowing => "Shadow full sentences after a countdown with combined mora + pitch grading.",
         }
     }
+
+    /// Returns the canonical database string representation for this practice mode.
+    #[allow(dead_code)]
+    pub const fn as_db_str(self) -> &'static str {
+        match self {
+            Self::MoraPurity => "MoraPurity",
+            Self::PitchAccent => "PitchAccent",
+            Self::CombinedShadowing => "CombinedShadowing",
+        }
+    }
+
+    /// Parses a [`PracticeMode`] from its canonical database string representation.
+    #[allow(dead_code)]
+    pub fn from_db_str(raw: &str) -> Result<Self> {
+        match raw.trim() {
+            "MoraPurity" => Ok(Self::MoraPurity),
+            "PitchAccent" => Ok(Self::PitchAccent),
+            "CombinedShadowing" => Ok(Self::CombinedShadowing),
+            other => bail!("Unknown practice mode '{other}'"),
+        }
+    }
 }
 
 /// Result of comparing user pitch contour against reference audio.
@@ -772,6 +793,27 @@ impl FsrsRating {
             Self::Easy => "Easy",
         }
     }
+
+    /// Returns the canonical database string representation for this FSRS rating.
+    pub const fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Again => "Again",
+            Self::Hard => "Hard",
+            Self::Good => "Good",
+            Self::Easy => "Easy",
+        }
+    }
+
+    /// Parses an [`FsrsRating`] from its canonical database string representation.
+    pub fn from_db_str(raw: &str) -> Result<Self> {
+        match raw.trim() {
+            "Again" => Ok(Self::Again),
+            "Hard" => Ok(Self::Hard),
+            "Good" => Ok(Self::Good),
+            "Easy" => Ok(Self::Easy),
+            other => bail!("Unknown FSRS rating '{other}'"),
+        }
+    }
 }
 
 /// Configurable percentage thresholds mapping combined practice scores to FSRS ratings.
@@ -787,16 +829,39 @@ pub struct ScoreThresholds {
 
 impl Default for ScoreThresholds {
     fn default() -> Self {
+        Self::balanced()
+    }
+}
+
+#[allow(dead_code)]
+impl ScoreThresholds {
+    /// Returns lenient score thresholds (`40% / 65% / 85%`) suited for early shadowing practice.
+    pub const fn lenient() -> Self {
+        Self {
+            hard_min: 40.0,
+            good_min: 65.0,
+            easy_min: 85.0,
+        }
+    }
+
+    /// Returns balanced default score thresholds (`50% / 75% / 90%`).
+    pub const fn balanced() -> Self {
         Self {
             hard_min: 50.0,
             good_min: 75.0,
             easy_min: 90.0,
         }
     }
-}
 
-#[allow(dead_code)]
-impl ScoreThresholds {
+    /// Returns strict score thresholds (`60% / 80% / 92%`) for precision drilling.
+    pub const fn strict() -> Self {
+        Self {
+            hard_min: 60.0,
+            good_min: 80.0,
+            easy_min: 92.0,
+        }
+    }
+
     /// Validates that thresholds are finite, ordered, and within `0.0..=100.0`.
     pub fn validate(&self) -> Result<()> {
         if !self.hard_min.is_finite() || !self.good_min.is_finite() || !self.easy_min.is_finite() {
@@ -833,6 +898,9 @@ pub struct FsrsCardState {
     pub card_id: i64,
     /// FSRS memory stability estimate in days.
     pub stability: f64,
+    /// FSRS-7 fast stability trace in days.
+    #[serde(default)]
+    pub stability_fast: f64,
     /// FSRS item difficulty estimate.
     pub difficulty: f64,
     /// Days elapsed since the previous pronunciation review.
@@ -858,6 +926,7 @@ impl FsrsCardState {
         Self {
             card_id,
             stability: 0.0,
+            stability_fast: 0.0,
             difficulty: 0.0,
             elapsed_days: 0,
             scheduled_days: 0,
@@ -896,6 +965,31 @@ impl DailyGoal {
         match self {
             Self::Cards(count) => format!("{count} cards / day"),
             Self::Minutes(minutes) => format!("{minutes} min / day"),
+        }
+    }
+
+    /// Returns the canonical kind identifier for database storage (`"Cards"` or `"Minutes"`).
+    pub const fn kind_str(self) -> &'static str {
+        match self {
+            Self::Cards(_) => "Cards",
+            Self::Minutes(_) => "Minutes",
+        }
+    }
+
+    /// Returns the numeric target value for this daily goal.
+    pub const fn target_value(self) -> u32 {
+        match self {
+            Self::Cards(count) => count,
+            Self::Minutes(minutes) => minutes,
+        }
+    }
+
+    /// Reconstructs a [`DailyGoal`] from persisted database columns.
+    pub fn from_parts(kind: &str, value: u32) -> Result<Self> {
+        match kind.trim() {
+            "Cards" => Ok(Self::Cards(value)),
+            "Minutes" => Ok(Self::Minutes(value)),
+            other => bail!("Unknown daily goal kind '{other}'"),
         }
     }
 }
@@ -1402,6 +1496,209 @@ impl AppErrorToast {
     }
 }
 
+/// Standard Japanese phonetic realization accepted for a target kana mora.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhoneticRealization {
+    /// IPA transcription representing the accepted surface realization.
+    pub ipa: String,
+    /// Human-readable description of the allophonic or devoiced realization.
+    pub label: String,
+    /// Whether this realization involves standard high-vowel devoicing.
+    pub is_devoiced: bool,
+}
+
+/// Equivalence and allophone acceptance rule for a single Japanese mora.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoraEquivalenceRule {
+    /// Canonical normalized hiragana representation of the mora.
+    pub canonical_kana: String,
+    /// Surface kana spellings considered phonemically equivalent (e.g., `じ`/`ぢ`).
+    pub equivalent_kana: Vec<String>,
+    /// Standard phonetic realizations accepted for this mora.
+    pub valid_realizations: Vec<PhoneticRealization>,
+    /// Whether high-vowel devoicing is permitted in voiceless contexts.
+    pub allows_vowel_devoicing: bool,
+}
+
+/// Input payload passed to a pluggable mora scorer implementation.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct MoraScoreRequest {
+    /// Identifier of the Anki card being evaluated.
+    pub card_id: i64,
+    /// Expected kana reading sequence for the utterance.
+    pub target_kana_sequence: String,
+    /// Trimmed mono or stereo user microphone recording.
+    pub user_audio: DecodedAudio,
+    /// Optional native reference audio buffer for alignment and energy comparison.
+    pub reference_audio: Option<DecodedAudio>,
+    /// UTC timestamp when the recording was captured.
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Aggregated output returned by a mora pronunciation scorer.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MoraEvaluation {
+    /// Per-mora classification attempts in target sequence order.
+    pub attempts: Vec<MoraAttempt>,
+    /// Overall mora clarity percentage in `0.0..=100.0`.
+    pub mora_accuracy_percent: f32,
+    /// Identifier of the scorer backend that produced this evaluation.
+    pub scorer_name: String,
+    /// Informational notes describing accepted allophones or devoiced morae.
+    pub accepted_allophone_notes: Vec<String>,
+}
+
+/// Combined pronunciation score breakdown and recommended FSRS rating for a review.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CombinedScoreBreakdown {
+    /// Practice mode used to weight mora and pitch metrics.
+    pub mode: PracticeMode,
+    /// Mora clarity percentage (`0.0..=100.0`) when applicable.
+    pub mora_accuracy_percent: Option<f32>,
+    /// Pitch contour accuracy percentage (`0.0..=100.0`) when applicable.
+    pub pitch_accuracy_percent: Option<f32>,
+    /// Pitch accent error percentage (`0.0..=100.0`) when applicable.
+    pub pitch_error_percent: Option<f32>,
+    /// Weighted combined score percentage (`0.0..=100.0`).
+    pub combined_score_percent: f32,
+    /// Automated FSRS rating recommended from `combined_score_percent`.
+    pub recommended_rating: FsrsRating,
+}
+
+/// Persisted review session record stored in Kotodama's local SQLite database.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewLogEntry {
+    /// SQLite row identifier (`None` before insertion).
+    pub id: Option<i64>,
+    /// Associated Anki card ID.
+    pub card_id: i64,
+    /// Name of the Anki deck containing this card.
+    pub deck_name: String,
+    /// Target Japanese word or expression.
+    pub word: String,
+    /// Target kana reading.
+    pub kana: String,
+    /// Practice mode used during this review.
+    pub practice_mode: PracticeMode,
+    /// Mora clarity percentage (`0.0..=100.0`) when evaluated.
+    pub mora_accuracy_percent: Option<f32>,
+    /// Pitch accent error percentage (`0.0..=100.0`) when evaluated.
+    pub pitch_error_percent: Option<f32>,
+    /// Mean semitone DTW distance when pitch contour was analyzed.
+    pub dtw_distance: Option<f32>,
+    /// Combined numeric score percentage (`0.0..=100.0`).
+    pub combined_score_percent: f32,
+    /// Rating suggested automatically from score thresholds.
+    pub recommended_rating: FsrsRating,
+    /// Final FSRS rating persisted (either recommended or manual override).
+    pub applied_rating: FsrsRating,
+    /// Whether the user manually overrode the automated rating.
+    pub was_manual_override: bool,
+    /// Active drill duration in milliseconds.
+    pub duration_ms: u64,
+    /// UTC timestamp when the review was recorded.
+    pub reviewed_at: DateTime<Utc>,
+}
+
+/// Per-review pitch accent error log record used for history views and exports.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PitchErrorLogEntry {
+    /// Identifier of the parent [`ReviewLogEntry`].
+    pub review_id: i64,
+    /// Associated Anki card ID.
+    pub card_id: i64,
+    /// Name of the Anki deck containing this card.
+    pub deck_name: String,
+    /// Target Japanese word or expression.
+    pub word: String,
+    /// Target kana reading.
+    pub kana: String,
+    /// Pitch accent error percentage (`0.0..=100.0`).
+    pub pitch_error_percent: f32,
+    /// Mean semitone DTW distance between reference and user contours.
+    pub dtw_distance: f32,
+    /// UTC timestamp when the review was recorded.
+    pub reviewed_at: DateTime<Utc>,
+}
+
+/// Daily aggregated accuracy summary point for analytics time-series charts.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DailyAccuracyPoint {
+    /// UTC calendar date of the aggregated reviews.
+    pub date: NaiveDate,
+    /// Total reviews completed on `date`.
+    pub review_count: u64,
+    /// Average mora clarity percentage across reviews with mora scores.
+    pub avg_mora_accuracy_percent: Option<f32>,
+    /// Average pitch accent error percentage across reviews with pitch scores.
+    pub avg_pitch_error_percent: Option<f32>,
+    /// Average combined score percentage across all reviews on `date`.
+    pub avg_combined_score_percent: f32,
+}
+
+/// Outcome returned after applying an FSRS review transition to a card.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FsrsSchedulingOutcome {
+    /// Card FSRS state prior to this review.
+    pub previous_state: FsrsCardState,
+    /// Updated card FSRS state after applying `applied_rating`.
+    pub next_state: FsrsCardState,
+    /// Automated rating recommended by score thresholds.
+    pub recommended_rating: FsrsRating,
+    /// Final rating applied to the FSRS memory model.
+    pub applied_rating: FsrsRating,
+    /// Whether `applied_rating` differed from `recommended_rating` via manual override.
+    pub was_manual_override: bool,
+    /// Prospective scheduled intervals in days for `[Again, Hard, Good, Easy]`.
+    pub preview_intervals_days: [u32; 4],
+}
+
+/// Complete JSON export snapshot of Kotodama's local pronunciation database.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportBundle {
+    /// UTC timestamp when this export snapshot was generated.
+    pub exported_at: DateTime<Utc>,
+    /// Kotodama application version that produced the export.
+    pub app_version: String,
+    /// Persisted daily streak and goal progress.
+    pub streak: DailyStreak,
+    /// Full chronological pronunciation review history.
+    pub review_history: Vec<ReviewLogEntry>,
+    /// Aggregated per-kana clarity and substitution matrix.
+    pub kana_stats: Vec<KanaStats>,
+    /// Pitch accent error log entries across reviewed cards.
+    pub pitch_error_logs: Vec<PitchErrorLogEntry>,
+    /// Independent FSRS scheduling states per Anki card ID.
+    pub fsrs_states: Vec<FsrsCardState>,
+}
+
+/// Summary report describing the CSV files written to an export directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CsvExportReport {
+    /// Output path of the review history CSV file.
+    pub reviews_path: PathBuf,
+    /// Output path of the per-kana confusion matrix CSV file.
+    pub kana_confusion_path: PathBuf,
+    /// Output path of the pitch accent error log CSV file.
+    pub pitch_errors_path: PathBuf,
+    /// Number of review log data rows exported.
+    pub review_rows: usize,
+    /// Number of kana confusion data rows exported.
+    pub kana_rows: usize,
+    /// Number of pitch error data rows exported.
+    pub pitch_rows: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1900,6 +2197,94 @@ mod tests {
         assert!(workspace.exclude_card("Core 2k", 1, Some(clean_card.display_label())));
         assert_eq!(workspace.restore_all_for_deck("Core 2k"), 1);
         assert_eq!(workspace.excluded_count_for_deck("Core 2k"), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn db_enum_round_trips_and_threshold_presets_validate() -> Result<()> {
+        for mode in PracticeMode::ALL {
+            assert_eq!(PracticeMode::from_db_str(mode.as_db_str())?, mode);
+        }
+        assert!(PracticeMode::from_db_str("UnknownMode").is_err());
+
+        for rating in FsrsRating::ALL {
+            assert_eq!(FsrsRating::from_db_str(rating.as_db_str())?, rating);
+        }
+        assert!(FsrsRating::from_db_str("Perfect").is_err());
+
+        for goal in [DailyGoal::Cards(15), DailyGoal::Minutes(10)] {
+            assert_eq!(
+                DailyGoal::from_parts(goal.kind_str(), goal.target_value())?,
+                goal
+            );
+        }
+        assert!(DailyGoal::from_parts("Hours", 1).is_err());
+
+        for preset in [
+            ScoreThresholds::lenient(),
+            ScoreThresholds::balanced(),
+            ScoreThresholds::strict(),
+        ] {
+            preset.validate()?;
+        }
+        assert_eq!(ScoreThresholds::default(), ScoreThresholds::balanced());
+        Ok(())
+    }
+
+    #[test]
+    fn phase_4_scoring_and_export_models_round_trip_json() -> Result<()> {
+        let now = sample_time();
+        let state = FsrsCardState::new_unseen(42, now);
+        assert!((state.stability_fast - 0.0).abs() < f64::EPSILON);
+
+        let bundle = ExportBundle {
+            exported_at: now,
+            app_version: "0.4.0".to_string(),
+            streak: DailyStreak::default(),
+            review_history: vec![ReviewLogEntry {
+                id: Some(1),
+                card_id: 42,
+                deck_name: "Core 2k".to_string(),
+                word: "靴".to_string(),
+                kana: "くつ".to_string(),
+                practice_mode: PracticeMode::CombinedShadowing,
+                mora_accuracy_percent: Some(90.0),
+                pitch_error_percent: Some(8.5),
+                dtw_distance: Some(0.51),
+                combined_score_percent: 90.75,
+                recommended_rating: FsrsRating::Easy,
+                applied_rating: FsrsRating::Good,
+                was_manual_override: true,
+                duration_ms: 1200,
+                reviewed_at: now,
+            }],
+            kana_stats: vec![KanaStats::new("つ")],
+            pitch_error_logs: vec![PitchErrorLogEntry {
+                review_id: 1,
+                card_id: 42,
+                deck_name: "Core 2k".to_string(),
+                word: "靴".to_string(),
+                kana: "くつ".to_string(),
+                pitch_error_percent: 8.5,
+                dtw_distance: 0.51,
+                reviewed_at: now,
+            }],
+            fsrs_states: vec![state],
+        };
+
+        let encoded = serde_json::to_string(&bundle)?;
+        let decoded: ExportBundle = serde_json::from_str(&encoded)?;
+        assert_eq!(bundle, decoded);
+
+        let csv_report = CsvExportReport {
+            reviews_path: PathBuf::from("/tmp/reviews.csv"),
+            kana_confusion_path: PathBuf::from("/tmp/kana.csv"),
+            pitch_errors_path: PathBuf::from("/tmp/pitch.csv"),
+            review_rows: 1,
+            kana_rows: 1,
+            pitch_rows: 1,
+        };
+        assert_eq!(csv_report.review_rows, 1);
         Ok(())
     }
 }
