@@ -21,16 +21,16 @@
   - Tracks daily streaks, configurable daily goals (cards or minutes), accuracy over time, per-card pitch error %, and top-5 confusion matrices per kana (e.g., `つ: 82% correct — 5% す, 4% ず, 3% すう, 6% unknown`).
   - Exports session history, confusion matrices, and pitch error logs to **CSV** and **JSON**.
 
-## Current Status (`v0.5.0`)
+## Current Status (`v0.6.0`)
 
-Phase 5 (Practice Views & Ergonomics) is complete:
-- Interactive **Practice** workflows (`src/ui/practice.rs`, `src/ui/mod.rs`) for **Mora Purity**, **Pitch Accent** (with an Iced `Canvas` semitone pitch contour overlay), and **Combined Shadowing** (with a `3 · 2 · 1` visual countdown and auto-record flow).
-- Keyboard-first Practice shortcuts (`Space`, `R`, `T`, `1`–`4`, `Enter`, `B`, `S`, `Esc`) with physical-key support under Japanese IMEs, **Blind / Audio-Only Mode** with automatic post-take reveal, `0.75x`/`1.0x` WSOLA playback, and **Daily Session Cap** enforcement for both card and minute goals (with **Continue Extra Practice** override).
-- Local SQLite persistence (`src/storage/db.rs`) tracking daily streaks, review logs, per-kana confusion matrices, pitch error logs, and independent `fsrs` scheduling states without modifying Anki databases.
-- Pluggable `MoraScorer` trait and pure-Rust `HeuristicAcousticMoraScorer` (`src/scoring/mora.rs`) implementing Japanese allophone and high-vowel devoicing rules plus top-5 confusion aggregation.
-- UTF-8 CSV and JSON exporters (`src/storage/export.rs`), `cpal` microphone capture & VAD calibration, YIN `F0` + DTW pitch engine, safe `collection.anki2` / `AnkiConnect` ingestion (`queue = 2`), interactive 5-field Setup mapper, GIGO audio checks, per-deck exclusions, and adaptive Light/Dark mode.
+Phase 6 (Analytics Dashboard & Export UI) is complete:
+- Full **Analytics Dashboard** (`src/ui/dashboard.rs`, `src/ui/mod.rs`) featuring a daily streak badge, daily goal completion progress, live KPI summary cards, and dual Iced `Canvas` accuracy-over-time charts (**Mora Clarity %** and **Pitch Accent Error %**) with `7 Days` / `30 Days` / `All Time` windows.
+- Searchable, sortable **Per-Kana Pronunciation Clarity** breakdown showing exact accuracy % and top-5 substitutions per kana with expandable phonetic/allophone realization guidance, plus **Per-Card Pitch Accent Error History** with per-card trend charts and DTW logs.
+- Interactive **Practice** workflows (`src/ui/practice.rs`, `src/ui/mod.rs`) for **Mora Purity**, **Pitch Accent** (with an Iced `Canvas` semitone pitch contour overlay), and **Combined Shadowing** (with a `3 · 2 · 1` visual countdown and auto-record flow), keyboard-first shortcuts (`Space`, `R`, `T`, `1`–`4`, `Enter`, `B`, `S`, `Esc`), **Blind / Audio-Only Mode**, `0.75x`/`1.0x` WSOLA playback, and **Daily Session Cap** enforcement.
+- Local SQLite persistence (`src/storage/db.rs`) tracking daily streaks, review logs, per-kana confusion matrices, pitch error logs, and independent `fsrs` scheduling states without modifying Anki databases, alongside UTF-8 **CSV** and **JSON** exports (`src/storage/export.rs`).
+- Pluggable `MoraScorer` trait and pure-Rust `HeuristicAcousticMoraScorer` (`src/scoring/mora.rs`), `cpal` microphone capture & VAD calibration, YIN `F0` + DTW pitch engine, safe `collection.anki2` / `AnkiConnect` ingestion (`queue = 2`), interactive 5-field Setup mapper, GIGO audio checks, per-deck exclusions, and adaptive Light/Dark mode.
 
-Upcoming phases add the full Analytics Dashboard charts & confusion breakdown UI (`v0.6.0`).
+Upcoming phases focus on error-path hardening, end-to-end integration testing, and UI polish (`v0.9.0`), followed by the production `v1.0.0` release.
 
 ## Connecting an Anki Deck & Mapping Fields
 

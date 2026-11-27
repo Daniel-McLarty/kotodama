@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-27
+
+### Added
+- Complete Analytics **Dashboard** UI (`src/ui/dashboard.rs`) with a prominent daily streak badge, 4 live KPI cards (Current Streak, Today's Progress, Mora Clarity, Avg Pitch Error), semantic daily goal completion progress bar, and manual **Refresh** action.
+- Dual Iced `Canvas` line/area trend charts (`TrendChartProgram`) visualizing daily **Mora Clarity %** and **Pitch Accent Error %** over `7 Days`, `30 Days`, and `All Time` windows.
+- Interactive **Per-Kana Pronunciation Clarity** explorer supporting katakana/hiragana/mistake search filtering, sorting (`Lowest Accuracy`, `Most Practiced`, `Kana Order`), top-5 substitution badges, and expandable phonetic/allophone realization panels.
+- Interactive **Per-Card Pitch Accent Error History** explorer ordered by highest recent error percentage, with search filtering, trend delta badges, per-card mini `Canvas` pitch trend charts, and recent review DTW logs.
+- Centralized Phase 6 domain models in `src/models.rs` (`DashboardTimeRange`, `KanaSortOrder`, `CardPitchSummary`, `DashboardSnapshot`), SQLite dashboard snapshot queries in `src/storage/db.rs` (`load_dashboard_snapshot`, `list_card_pitch_summaries`), and adaptive progress-bar/row button styles in `src/ui/theme.rs`.
+
+### Changed
+- Wired `KotodamaApp` (`src/ui/mod.rs`) to hydrate `DashboardState` from SQLite on boot and refresh analytics automatically when switching to the Dashboard tab or clicking Refresh, while keeping daily goal and streak views synchronized across tabs.
+
 ## [0.5.0] - 2026-11-26
 
 ### Added

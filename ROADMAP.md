@@ -27,7 +27,7 @@ Execute one phase at a time. Commit and push logically after each meaningful uni
   - Build Mora Purity, Pitch Testing (with Iced `Canvas` pitch contour overlay), and Combined Shadowing screens.
   - Wire up keyboard-first shortcuts (`Space`, `R`, `T`, `1–4`), Blind/Audio-Only mode, and Daily Session Cap tracking.
 
-- [ ] **Phase 6: Analytics Dashboard & Export UI (`v0.6.0`)**
+- [x] **Phase 6: Analytics Dashboard & Export UI (`v0.6.0`)**
   - Build Dashboard with daily streak badge, daily goal progress, and accuracy-over-time line graphs (mora clarity % and pitch error %).
   - Build per-kana breakdown view displaying accuracy % and top-5 most common mistakes per kana, plus per-card pitch error history and CSV/JSON export buttons.
 

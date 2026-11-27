@@ -1,6 +1,6 @@
 [package]
 name = "kotodama"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MPL-2.0"
 description = "A local-first, gamified Japanese pronunciation and pitch-accent trainer powered by Anki and FSRS."
