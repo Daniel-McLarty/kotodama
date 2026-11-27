@@ -30,16 +30,18 @@ use crate::audio::capture::{self, MicMonitorHandle, RecordingSession};
 use crate::audio::{dsp, playback};
 use crate::models::{
     AnkiCard, AnkiCollectionSummary, AnkiRawNote, AppErrorToast, AppSettings, CsvExportReport,
-    DailyGoal, DailyStreak, DecodedAudio, DeckAudioReport, DeckConfig, DeckWorkspaceConfig,
-    FsrsCardState, FsrsRating, FsrsSchedulingOutcome, InputDeviceInfo, MicLevelSnapshot, NavTab,
-    PitchExtractionConfig, PlaybackSpeed, PracticeDeckStatus, PracticeEvaluationResult,
-    PracticeMicViewState, PracticeMode, PracticeShortcutAction, PracticeTargetClip, RecordedTake,
+    DailyGoal, DailyStreak, DashboardSnapshot, DashboardTimeRange, DecodedAudio, DeckAudioReport,
+    DeckConfig, DeckWorkspaceConfig, FsrsCardState, FsrsRating, FsrsSchedulingOutcome,
+    InputDeviceInfo, KanaSortOrder, MicLevelSnapshot, NavTab, PitchExtractionConfig,
+    PlaybackSpeed, PracticeDeckStatus, PracticeEvaluationResult, PracticeMicViewState,
+    PracticeMode, PracticeShortcutAction, PracticeTargetClip, RecordedTake,
     ReferenceContourPreview, ResolvedTheme, ScoreThresholds, ThemePreference, VadConfig,
 };
 use crate::scoring::fsrs_bridge::FsrsScheduler;
 use crate::scoring::mora::{HeuristicAcousticMoraScorer, MoraScorer};
 use crate::scoring::pitch;
 use crate::storage::{self, db::KotodamaDb, export};
+use crate::ui::dashboard::DashboardState;
 use crate::ui::practice::{PracticePhase, PracticeState};
 use crate::ui::setup::{NONE_FIELD_OPTION, SetupSourceMode, SetupState};
 use crate::ui::theme::ThemeTokens;
@@ -258,6 +260,22 @@ pub enum Message {
     PracticeSessionTick,
     /// Triggers a sample recoverable error toast from Settings for testing UX.
     TriggerSampleError,
+    /// Requests a fresh SQLite analytics snapshot for the Dashboard view.
+    DashboardRefreshRequested,
+    /// Receives a loaded analytics snapshot for the Dashboard view.
+    DashboardLoaded(Result<DashboardSnapshot, String>),
+    /// Changes the trend chart calendar window on the Dashboard.
+    DashboardSelectTimeRange(DashboardTimeRange),
+    /// Changes the sorting order of the per-kana breakdown list on the Dashboard.
+    DashboardSelectKanaSort(KanaSortOrder),
+    /// Updates the search filter for per-kana clarity rows on the Dashboard.
+    DashboardKanaFilterChanged(String),
+    /// Expands or collapses a specific kana breakdown detail panel on the Dashboard.
+    DashboardSelectKana(Option<String>),
+    /// Updates the search filter for per-card pitch history rows on the Dashboard.
+    DashboardPitchCardFilterChanged(String),
+    /// Expands or collapses a specific card's pitch error history panel on the Dashboard.
+    DashboardSelectPitchCard(Option<i64>),
     /// Dismisses a single toast notification by ID.
     DismissToast(u64),
     /// Clears all currently visible toast notifications.
@@ -272,6 +290,7 @@ pub struct KotodamaApp {
     loaded_cards: Vec<AnkiCard>,
     setup_state: SetupState,
     practice_state: PracticeState,
+    dashboard_state: DashboardState,
     practice_recording: Option<RecordingSession>,
     practice_mic_level: MicLevelSnapshot,
     streak: DailyStreak,
@@ -305,6 +324,7 @@ impl Default for KotodamaApp {
             loaded_cards: Vec::new(),
             setup_state: SetupState::default(),
             practice_state: PracticeState::default(),
+            dashboard_state: DashboardState::default(),
             practice_recording: None,
             practice_mic_level: MicLevelSnapshot::default(),
             streak,
@@ -1526,6 +1546,14 @@ impl KotodamaApp {
                     Some("Choose a valid collection.anki2 file or retry AnkiConnect.".to_string()),
                 );
             }
+            Message::DashboardRefreshRequested
+            | Message::DashboardLoaded(_)
+            | Message::DashboardSelectTimeRange(_)
+            | Message::DashboardSelectKanaSort(_)
+            | Message::DashboardKanaFilterChanged(_)
+            | Message::DashboardSelectKana(_)
+            | Message::DashboardPitchCardFilterChanged(_)
+            | Message::DashboardSelectPitchCard(_) => {}
             Message::DismissToast(id) => {
                 self.toasts.retain(|toast| toast.id != id);
             }
@@ -1572,6 +1600,7 @@ impl KotodamaApp {
                 resolved_theme,
             ),
             NavTab::Dashboard => dashboard::view(
+                &self.dashboard_state,
                 &self.streak,
                 self.last_export_status.as_deref(),
                 resolved_theme,
