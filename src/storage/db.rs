@@ -9,8 +9,9 @@ use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::models::{
-    DailyAccuracyPoint, DailyGoal, DailyStreak, ExportBundle, FsrsCardState, FsrsRating, KanaStats,
-    MoraAttempt, PitchErrorLogEntry, PracticeMode, ReviewLogEntry,
+    CardPitchSummary, DailyAccuracyPoint, DailyGoal, DailyStreak, DashboardSnapshot, ExportBundle,
+    FsrsCardState, FsrsRating, KanaStats, MoraAttempt, PitchErrorLogEntry, PracticeMode,
+    ReviewLogEntry,
 };
 
 const SCHEMA_SQL: &str = r#"
@@ -399,52 +400,54 @@ impl KotodamaDb {
 
     /// Aggregates daily average mora accuracy, pitch error, and combined score sorted chronologically.
     pub fn daily_accuracy_series(&self) -> Result<Vec<DailyAccuracyPoint>> {
-        #[derive(Default)]
-        struct DayAccumulator {
-            review_count: u64,
-            mora_sum: f64,
-            mora_count: u64,
-            pitch_sum: f64,
-            pitch_count: u64,
-            combined_sum: f64,
-        }
+        let reviews = self.list_review_logs(None)?;
+        Ok(aggregate_daily_accuracy_series(&reviews))
+    }
 
-        let mut by_date: BTreeMap<NaiveDate, DayAccumulator> = BTreeMap::new();
-        for entry in self.list_review_logs(None)? {
-            let date = entry.reviewed_at.date_naive();
-            let acc = by_date.entry(date).or_default();
-            acc.review_count = acc.review_count.saturating_add(1);
-            acc.combined_sum += f64::from(entry.combined_score_percent);
+    /// Aggregates per-card pitch accent error summaries sorted by highest recent pitch error first.
+    pub fn list_card_pitch_summaries(&self) -> Result<Vec<CardPitchSummary>> {
+        let logs = self.list_pitch_error_logs()?;
+        Ok(summarize_card_pitch_logs(&logs))
+    }
+
+    /// Loads streaks, daily accuracy trends, per-kana stats, and per-card pitch error history for the Dashboard.
+    pub fn load_dashboard_snapshot(&self) -> Result<DashboardSnapshot> {
+        let streak = self.load_daily_streak()?;
+        let reviews = self.list_review_logs(None)?;
+        let kana_stats = self.list_all_kana_stats()?;
+        let pitch_error_logs = self.list_pitch_error_logs()?;
+
+        let daily_series = aggregate_daily_accuracy_series(&reviews);
+        let card_pitch_summaries = summarize_card_pitch_logs(&pitch_error_logs);
+
+        let mut mora_sum = 0.0_f64;
+        let mut mora_count = 0_u64;
+        let mut pitch_sum = 0.0_f64;
+        let mut pitch_count = 0_u64;
+        for entry in &reviews {
             if let Some(mora) = entry.mora_accuracy_percent {
-                acc.mora_sum += f64::from(mora);
-                acc.mora_count = acc.mora_count.saturating_add(1);
+                mora_sum += f64::from(mora);
+                mora_count = mora_count.saturating_add(1);
             }
             if let Some(pitch) = entry.pitch_error_percent {
-                acc.pitch_sum += f64::from(pitch);
-                acc.pitch_count = acc.pitch_count.saturating_add(1);
+                pitch_sum += f64::from(pitch);
+                pitch_count = pitch_count.saturating_add(1);
             }
         }
 
-        let series = by_date
-            .into_iter()
-            .map(|(date, acc)| DailyAccuracyPoint {
-                date,
-                review_count: acc.review_count,
-                avg_mora_accuracy_percent: if acc.mora_count > 0 {
-                    Some((acc.mora_sum / acc.mora_count as f64) as f32)
-                } else {
-                    None
-                },
-                avg_pitch_error_percent: if acc.pitch_count > 0 {
-                    Some((acc.pitch_sum / acc.pitch_count as f64) as f32)
-                } else {
-                    None
-                },
-                avg_combined_score_percent: (acc.combined_sum / acc.review_count.max(1) as f64)
-                    as f32,
-            })
-            .collect();
-        Ok(series)
+        Ok(DashboardSnapshot {
+            streak,
+            total_reviews: reviews.len() as u64,
+            overall_mora_accuracy_percent: (mora_count > 0)
+                .then_some((mora_sum / mora_count.max(1) as f64) as f32),
+            overall_pitch_error_percent: (pitch_count > 0)
+                .then_some((pitch_sum / pitch_count.max(1) as f64) as f32),
+            tracked_kana_count: kana_stats.len(),
+            daily_series,
+            kana_stats,
+            card_pitch_summaries,
+            pitch_error_logs,
+        })
     }
 
     /// Atomically persists mora attempts and updates cumulative per-kana confusion counts.
@@ -592,6 +595,112 @@ impl KotodamaDb {
             fsrs_states: self.list_fsrs_states()?,
         })
     }
+}
+
+fn aggregate_daily_accuracy_series(reviews: &[ReviewLogEntry]) -> Vec<DailyAccuracyPoint> {
+    #[derive(Default)]
+    struct DayAccumulator {
+        review_count: u64,
+        mora_sum: f64,
+        mora_count: u64,
+        pitch_sum: f64,
+        pitch_count: u64,
+        combined_sum: f64,
+    }
+
+    let mut by_date: BTreeMap<NaiveDate, DayAccumulator> = BTreeMap::new();
+    for entry in reviews {
+        let date = entry.reviewed_at.date_naive();
+        let acc = by_date.entry(date).or_default();
+        acc.review_count = acc.review_count.saturating_add(1);
+        acc.combined_sum += f64::from(entry.combined_score_percent);
+        if let Some(mora) = entry.mora_accuracy_percent {
+            acc.mora_sum += f64::from(mora);
+            acc.mora_count = acc.mora_count.saturating_add(1);
+        }
+        if let Some(pitch) = entry.pitch_error_percent {
+            acc.pitch_sum += f64::from(pitch);
+            acc.pitch_count = acc.pitch_count.saturating_add(1);
+        }
+    }
+
+    by_date
+        .into_iter()
+        .map(|(date, acc)| DailyAccuracyPoint {
+            date,
+            review_count: acc.review_count,
+            avg_mora_accuracy_percent: if acc.mora_count > 0 {
+                Some((acc.mora_sum / acc.mora_count as f64) as f32)
+            } else {
+                None
+            },
+            avg_pitch_error_percent: if acc.pitch_count > 0 {
+                Some((acc.pitch_sum / acc.pitch_count as f64) as f32)
+            } else {
+                None
+            },
+            avg_combined_score_percent: (acc.combined_sum / acc.review_count.max(1) as f64) as f32,
+        })
+        .collect()
+}
+
+fn summarize_card_pitch_logs(logs: &[PitchErrorLogEntry]) -> Vec<CardPitchSummary> {
+    struct CardAccumulator<'a> {
+        latest: &'a PitchErrorLogEntry,
+        review_count: u64,
+        sum_error: f64,
+        best_error: f32,
+        recent_errors_desc: Vec<f32>,
+    }
+
+    let mut by_card: BTreeMap<i64, CardAccumulator<'_>> = BTreeMap::new();
+    for entry in logs {
+        let acc = by_card.entry(entry.card_id).or_insert_with(|| CardAccumulator {
+            latest: entry,
+            review_count: 0,
+            sum_error: 0.0,
+            best_error: entry.pitch_error_percent,
+            recent_errors_desc: Vec::with_capacity(12),
+        });
+        acc.review_count = acc.review_count.saturating_add(1);
+        acc.sum_error += f64::from(entry.pitch_error_percent);
+        if entry.pitch_error_percent < acc.best_error {
+            acc.best_error = entry.pitch_error_percent;
+        }
+        if acc.recent_errors_desc.len() < 12 {
+            acc.recent_errors_desc.push(entry.pitch_error_percent);
+        }
+    }
+
+    let mut summaries: Vec<CardPitchSummary> = by_card
+        .into_values()
+        .map(|mut acc| {
+            acc.recent_errors_desc.reverse();
+            CardPitchSummary {
+                card_id: acc.latest.card_id,
+                deck_name: acc.latest.deck_name.clone(),
+                word: acc.latest.word.clone(),
+                kana: acc.latest.kana.clone(),
+                review_count: acc.review_count,
+                latest_pitch_error_percent: acc.latest.pitch_error_percent,
+                average_pitch_error_percent: (acc.sum_error / acc.review_count.max(1) as f64)
+                    as f32,
+                best_pitch_error_percent: acc.best_error,
+                latest_dtw_distance: acc.latest.dtw_distance,
+                last_reviewed_at: acc.latest.reviewed_at,
+                recent_errors: acc.recent_errors_desc,
+            }
+        })
+        .collect();
+
+    summaries.sort_by(|left, right| {
+        right
+            .latest_pitch_error_percent
+            .total_cmp(&left.latest_pitch_error_percent)
+            .then_with(|| right.last_reviewed_at.cmp(&left.last_reviewed_at))
+            .then_with(|| left.card_id.cmp(&right.card_id))
+    });
+    summaries
 }
 
 fn load_daily_streak_conn(conn: &Connection) -> Result<DailyStreak> {
@@ -1212,6 +1321,134 @@ mod tests {
         assert_eq!(bundle.pitch_error_logs.len(), 2);
         assert_eq!(bundle.fsrs_states.len(), 1);
         assert_eq!(bundle.streak.total_sessions, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn dashboard_snapshot_handles_empty_db_and_aggregates_multi_card_pitch_history() -> Result<()> {
+        let mut db = KotodamaDb::open_in_memory()?;
+        let empty = db.load_dashboard_snapshot()?;
+        assert!(empty.is_empty());
+        assert_eq!(empty.total_reviews, 0);
+        assert_eq!(empty.overall_mora_accuracy_percent, None);
+        assert_eq!(empty.overall_pitch_error_percent, None);
+        assert!(empty.card_pitch_summaries.is_empty());
+
+        let t1 = ts(2026, 11, 25, 9);
+        let t2 = ts(2026, 11, 26, 11);
+        let t3 = ts(2026, 11, 27, 14);
+
+        let reviews = [
+            (
+                ReviewLogEntry {
+                    id: None,
+                    card_id: 101,
+                    deck_name: "Core 2k".to_string(),
+                    word: "橋".to_string(),
+                    kana: "はし".to_string(),
+                    practice_mode: PracticeMode::CombinedShadowing,
+                    mora_accuracy_percent: Some(75.0),
+                    pitch_error_percent: Some(30.0),
+                    dtw_distance: Some(1.6),
+                    combined_score_percent: 72.5,
+                    recommended_rating: FsrsRating::Hard,
+                    applied_rating: FsrsRating::Hard,
+                    was_manual_override: false,
+                    duration_ms: 1_500,
+                    reviewed_at: t1,
+                },
+                vec![MoraAttempt {
+                    card_id: 101,
+                    expected_kana: "は".to_string(),
+                    heard_kana: Some("は".to_string()),
+                    confidence: 0.9,
+                    recorded_at: t1,
+                }],
+            ),
+            (
+                ReviewLogEntry {
+                    id: None,
+                    card_id: 101,
+                    deck_name: "Core 2k".to_string(),
+                    word: "橋".to_string(),
+                    kana: "はし".to_string(),
+                    practice_mode: PracticeMode::PitchAccent,
+                    mora_accuracy_percent: None,
+                    pitch_error_percent: Some(12.0),
+                    dtw_distance: Some(0.6),
+                    combined_score_percent: 88.0,
+                    recommended_rating: FsrsRating::Good,
+                    applied_rating: FsrsRating::Good,
+                    was_manual_override: false,
+                    duration_ms: 1_100,
+                    reviewed_at: t2,
+                },
+                Vec::new(),
+            ),
+            (
+                ReviewLogEntry {
+                    id: None,
+                    card_id: 202,
+                    deck_name: "Core 2k".to_string(),
+                    word: "雨".to_string(),
+                    kana: "あめ".to_string(),
+                    practice_mode: PracticeMode::CombinedShadowing,
+                    mora_accuracy_percent: Some(95.0),
+                    pitch_error_percent: Some(26.0),
+                    dtw_distance: Some(1.4),
+                    combined_score_percent: 84.5,
+                    recommended_rating: FsrsRating::Good,
+                    applied_rating: FsrsRating::Good,
+                    was_manual_override: false,
+                    duration_ms: 1_300,
+                    reviewed_at: t3,
+                },
+                vec![MoraAttempt {
+                    card_id: 202,
+                    expected_kana: "あ".to_string(),
+                    heard_kana: Some("あ".to_string()),
+                    confidence: 0.95,
+                    recorded_at: t3,
+                }],
+            ),
+        ];
+
+        for (review, attempts) in reviews {
+            let state = FsrsCardState::new_unseen(review.card_id, review.reviewed_at);
+            db.commit_review_transaction(
+                &review,
+                &attempts,
+                &state,
+                review.reviewed_at.date_naive(),
+                1,
+                DailyGoal::Cards(10),
+            )?;
+        }
+
+        let summaries = db.list_card_pitch_summaries()?;
+        assert_eq!(summaries.len(), 2);
+        // Sorted by latest pitch error descending: card 202 (26%) before card 101 (12%).
+        assert_eq!(summaries[0].card_id, 202);
+        assert_eq!(summaries[0].review_count, 1);
+        assert_eq!(summaries[1].card_id, 101);
+        assert_eq!(summaries[1].review_count, 2);
+        assert!((summaries[1].latest_pitch_error_percent - 12.0).abs() < 1e-5);
+        assert!((summaries[1].average_pitch_error_percent - 21.0).abs() < 1e-5);
+        assert!((summaries[1].best_pitch_error_percent - 12.0).abs() < 1e-5);
+        assert_eq!(summaries[1].recent_errors, vec![30.0, 12.0]);
+
+        let snapshot = db.load_dashboard_snapshot()?;
+        assert!(!snapshot.is_empty());
+        assert_eq!(snapshot.total_reviews, 3);
+        assert_eq!(snapshot.tracked_kana_count, 2);
+        assert_eq!(snapshot.daily_series.len(), 3);
+        assert_eq!(snapshot.pitch_error_logs.len(), 3);
+        assert!((snapshot.overall_mora_accuracy_percent.unwrap_or(0.0) - 85.0).abs() < 1e-4);
+        assert!(
+            (snapshot.overall_pitch_error_percent.unwrap_or(0.0) - ((30.0 + 12.0 + 26.0) / 3.0))
+                .abs()
+                < 1e-4
+        );
         Ok(())
     }
 }
