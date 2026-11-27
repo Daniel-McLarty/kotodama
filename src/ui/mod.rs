@@ -28,12 +28,12 @@ use crate::anki::{reader, validator};
 use crate::audio::capture::{self, MicMonitorHandle, RecordingSession};
 use crate::audio::playback;
 use crate::models::{
-    AnkiCard, AnkiCollectionSummary, AnkiRawNote, AppErrorToast, AppSettings, DailyGoal,
-    DailyStreak, DeckAudioReport, DeckConfig, DeckWorkspaceConfig, InputDeviceInfo,
+    AnkiCard, AnkiCollectionSummary, AnkiRawNote, AppErrorToast, AppSettings, CsvExportReport,
+    DailyGoal, DailyStreak, DeckAudioReport, DeckConfig, DeckWorkspaceConfig, InputDeviceInfo,
     MicLevelSnapshot, NavTab, PlaybackSpeed, PracticeMode, RecordedTake, ResolvedTheme,
-    ThemePreference, VadConfig,
+    ScoreThresholds, ThemePreference, VadConfig,
 };
-use crate::storage;
+use crate::storage::{self, db::KotodamaDb, export};
 use crate::ui::setup::{NONE_FIELD_OPTION, SetupSourceMode, SetupState};
 use crate::ui::theme::ThemeTokens;
 
@@ -61,6 +61,16 @@ pub enum Message {
     SelectPlaybackSpeed(PlaybackSpeed),
     /// Updates the daily card goal preset.
     SetDailyGoalCards(u32),
+    /// Updates the score-to-FSRS rating thresholds.
+    SetScoreThresholds(ScoreThresholds),
+    /// Prompts for a folder and exports review history, kana stats, and pitch logs to CSV.
+    ExportCsvRequested,
+    /// Receives the outcome of exporting database records to CSV files.
+    CsvExportCompleted(Result<Option<CsvExportReport>, String>),
+    /// Prompts for a file path and exports the full local database snapshot to JSON.
+    ExportJsonRequested,
+    /// Receives the outcome of exporting the full local database snapshot to JSON.
+    JsonExportCompleted(Result<Option<PathBuf>, String>),
     /// Refreshes the list of available microphone input devices.
     RefreshInputDevices,
     /// Receives the enumerated list of microphone input devices.
@@ -173,6 +183,8 @@ pub struct KotodamaApp {
     system_is_dark: Option<bool>,
     settings_path: Option<PathBuf>,
     deck_config_path: Option<PathBuf>,
+    db_path: Option<PathBuf>,
+    last_export_status: Option<String>,
     toasts: Vec<AppErrorToast>,
     next_toast_id: u64,
 }
@@ -201,6 +213,8 @@ impl Default for KotodamaApp {
             system_is_dark: None,
             settings_path: None,
             deck_config_path: None,
+            db_path: None,
+            last_export_status: None,
             toasts: Vec::new(),
             next_toast_id: 1,
         }
@@ -260,6 +274,41 @@ impl KotodamaApp {
                     "Deck Persistence Unavailable",
                     format!("{err:#}"),
                     Some("Deck field mappings will apply for this session only.".to_string()),
+                );
+            }
+        }
+
+        match storage::default_database_path() {
+            Ok(db_path) => match KotodamaDb::open(&db_path) {
+                Ok(db) => {
+                    match db.load_daily_streak() {
+                        Ok(mut streak) => {
+                            streak.daily_goal = app.settings.daily_goal;
+                            app.streak = streak;
+                        }
+                        Err(err) => {
+                            app.report_warning(
+                                "Streak History Unavailable",
+                                format!("{err:#}"),
+                                Some("Daily streak counters will use fresh session state.".to_string()),
+                            );
+                        }
+                    }
+                    app.db_path = Some(db_path);
+                }
+                Err(err) => {
+                    app.report_warning(
+                        "Database Initialization Warning",
+                        format!("{err:#}"),
+                        Some("FSRS scheduling and review history persistence are unavailable.".to_string()),
+                    );
+                }
+            },
+            Err(err) => {
+                app.report_warning(
+                    "Local Database Unavailable",
+                    format!("{err:#}"),
+                    Some("Analytics exports and local FSRS persistence require a writable data directory.".to_string()),
                 );
             }
         }
@@ -392,6 +441,134 @@ impl KotodamaApp {
                 self.streak.daily_goal = goal;
                 self.persist_settings();
             }
+            Message::SetScoreThresholds(thresholds) => match thresholds.validate() {
+                Ok(()) => {
+                    self.settings.score_thresholds = thresholds;
+                    self.persist_settings();
+                }
+                Err(err) => {
+                    self.report_error(
+                        "Invalid FSRS Thresholds",
+                        &err,
+                        Some("Ensure Hard < Good < Easy within 0%..=100%.".to_string()),
+                    );
+                }
+            },
+            Message::ExportCsvRequested => {
+                let db_path = match self
+                    .db_path
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("Local database path is unavailable."))
+                    .or_else(|_| storage::default_database_path())
+                {
+                    Ok(path) => path,
+                    Err(err) => {
+                        self.report_error(
+                            "CSV Export Unavailable",
+                            &err,
+                            Some("Ensure your system data directory is accessible.".to_string()),
+                        );
+                        return Task::none();
+                    }
+                };
+
+                return Task::perform(
+                    async move {
+                        let picked = rfd::AsyncFileDialog::new()
+                            .set_title("Choose Folder for Kotodama CSV Exports")
+                            .pick_folder()
+                            .await;
+                        let Some(folder) = picked else {
+                            return Ok(None);
+                        };
+                        let output_dir = folder.path().to_path_buf();
+                        run_blocking(move || {
+                            let db = KotodamaDb::open(&db_path)?;
+                            export::export_db_to_csv_directory(&db, &output_dir)
+                        })
+                        .await
+                        .map(Some)
+                    },
+                    Message::CsvExportCompleted,
+                );
+            }
+            Message::CsvExportCompleted(result) => match result {
+                Ok(Some(report)) => {
+                    let dir_display = report
+                        .reviews_path
+                        .parent()
+                        .map_or_else(|| report.reviews_path.display().to_string(), |p| p.display().to_string());
+                    self.last_export_status = Some(format!(
+                        "Exported CSV files to {dir_display} ({} reviews, {} kana rows, {} pitch rows).",
+                        report.review_rows, report.kana_rows, report.pitch_rows
+                    ));
+                }
+                Ok(None) => {}
+                Err(err_msg) => {
+                    let err = anyhow::anyhow!(err_msg);
+                    self.report_error(
+                        "CSV Export Failed",
+                        &err,
+                        Some("Choose a writable folder and retry exporting.".to_string()),
+                    );
+                }
+            },
+            Message::ExportJsonRequested => {
+                let db_path = match self
+                    .db_path
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("Local database path is unavailable."))
+                    .or_else(|_| storage::default_database_path())
+                {
+                    Ok(path) => path,
+                    Err(err) => {
+                        self.report_error(
+                            "JSON Export Unavailable",
+                            &err,
+                            Some("Ensure your system data directory is accessible.".to_string()),
+                        );
+                        return Task::none();
+                    }
+                };
+
+                return Task::perform(
+                    async move {
+                        let picked = rfd::AsyncFileDialog::new()
+                            .set_title("Export Kotodama Database as JSON")
+                            .set_file_name("kotodama_export.json")
+                            .add_filter("JSON", &["json"])
+                            .save_file()
+                            .await;
+                        let Some(file) = picked else {
+                            return Ok(None);
+                        };
+                        let out_path = file.path().to_path_buf();
+                        run_blocking(move || {
+                            let db = KotodamaDb::open(&db_path)?;
+                            export::export_db_to_json(&db, &out_path)?;
+                            Ok(out_path)
+                        })
+                        .await
+                        .map(Some)
+                    },
+                    Message::JsonExportCompleted,
+                );
+            }
+            Message::JsonExportCompleted(result) => match result {
+                Ok(Some(path)) => {
+                    self.last_export_status =
+                        Some(format!("Exported full JSON snapshot to {}.", path.display()));
+                }
+                Ok(None) => {}
+                Err(err_msg) => {
+                    let err = anyhow::anyhow!(err_msg);
+                    self.report_error(
+                        "JSON Export Failed",
+                        &err,
+                        Some("Choose a writable destination file and retry exporting.".to_string()),
+                    );
+                }
+            },
             Message::RefreshInputDevices => {
                 return Task::perform(
                     run_blocking(capture::list_input_devices),
@@ -856,14 +1033,14 @@ impl KotodamaApp {
             }
             Message::TriggerRecoverableAction => {
                 let message = if self.deck_workspace.active_deck.is_some() {
-                    "Mora scoring, FSRS scheduling, interactive practice canvases, and analytics exports are scheduled for Phases 4–6."
+                    "Interactive Practice Canvas views and live drill sessions are scheduled for Phase 5."
                 } else {
-                    "Connect and validate an Anki deck in Setup first, then check back as Phases 4–6 land."
+                    "Connect and validate an Anki deck in Setup first; interactive practice views land in Phase 5."
                 };
                 self.report_warning(
-                    "Upcoming Practice & Export Feature",
+                    "Upcoming Practice View",
                     message,
-                    Some("Your deck, audio pipeline, and mic calibration are ready.".to_string()),
+                    Some("Mora scoring, FSRS scheduling, SQLite storage, and Dashboard CSV/JSON exports are ready.".to_string()),
                 );
             }
             Message::TriggerSampleError => {
@@ -910,7 +1087,11 @@ impl KotodamaApp {
                 self.deck_workspace.active_deck.is_some(),
                 resolved_theme,
             ),
-            NavTab::Dashboard => dashboard::view(&self.streak, resolved_theme),
+            NavTab::Dashboard => dashboard::view(
+                &self.streak,
+                self.last_export_status.as_deref(),
+                resolved_theme,
+            ),
             NavTab::Settings => self.render_settings(resolved_theme, colors),
         };
 
@@ -1396,15 +1577,35 @@ impl KotodamaApp {
         .style(theme::card_style);
 
         let thresholds = &self.settings.score_thresholds;
+        let threshold_presets = [
+            ("Lenient (40/65/85)", ScoreThresholds::lenient()),
+            ("Balanced (50/75/90)", ScoreThresholds::balanced()),
+            ("Strict (60/80/92)", ScoreThresholds::strict()),
+        ]
+        .into_iter()
+        .fold(row![].spacing(10), |r, (label, preset)| {
+            let selected = thresholds == &preset;
+            r.push(
+                button(text(label).size(13))
+                    .padding([8, 14])
+                    .style(theme::pill_button_style(selected))
+                    .on_press(Message::SetScoreThresholds(preset)),
+            )
+        });
+
         let fsrs_card = container(
             column![
                 text("FSRS Score Thresholds").size(18).color(colors.text_primary),
+                text("Choose how combined mora and pitch scores map automatically to FSRS ratings.")
+                    .size(14)
+                    .color(colors.text_muted),
+                threshold_presets,
                 text(format!(
-                    "Hard >= {:.0}% · Good >= {:.0}% · Easy >= {:.0}%",
-                    thresholds.hard_min, thresholds.good_min, thresholds.easy_min
+                    "Again < {:.0}% · Hard >= {:.0}% · Good >= {:.0}% · Easy >= {:.0}%",
+                    thresholds.hard_min, thresholds.hard_min, thresholds.good_min, thresholds.easy_min
                 ))
-                .size(14)
-                .color(colors.text_muted),
+                .size(13)
+                .color(colors.sage),
                 button(text("Preview Recoverable Error Toast").size(14))
                     .padding([10, 16])
                     .style(theme::secondary_button_style)
@@ -2325,5 +2526,69 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
         Ok(())
+    }
+
+    #[test]
+    fn fsrs_threshold_presets_update_and_validate() -> anyhow::Result<()> {
+        let (dir, settings_path, deck_path) = temp_config_paths("fsrs_thresholds");
+        let mut app = KotodamaApp::with_config_paths(settings_path.clone(), deck_path);
+
+        let _ = app.update(Message::SetScoreThresholds(ScoreThresholds::strict()));
+        assert_eq!(app.settings.score_thresholds, ScoreThresholds::strict());
+        assert!(app.toasts.is_empty());
+
+        let invalid = ScoreThresholds {
+            hard_min: 80.0,
+            good_min: 70.0,
+            easy_min: 90.0,
+        };
+        let _ = app.update(Message::SetScoreThresholds(invalid));
+        assert_eq!(app.settings.score_thresholds, ScoreThresholds::strict());
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].severity, ErrorSeverity::Error);
+
+        let persisted = storage::load_settings(&settings_path)?;
+        assert_eq!(persisted.score_thresholds, ScoreThresholds::strict());
+
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn export_completion_and_error_handlers_update_status_and_toasts() {
+        let mut app = KotodamaApp::default();
+
+        let _ = app.update(Message::CsvExportCompleted(Ok(None)));
+        assert!(app.last_export_status.is_none());
+        assert!(app.toasts.is_empty());
+
+        let report = CsvExportReport {
+            reviews_path: PathBuf::from("/tmp/exports/kotodama_review_history.csv"),
+            kana_confusion_path: PathBuf::from("/tmp/exports/kotodama_kana_confusion.csv"),
+            pitch_errors_path: PathBuf::from("/tmp/exports/kotodama_pitch_errors.csv"),
+            review_rows: 3,
+            kana_rows: 5,
+            pitch_rows: 2,
+        };
+        let _ = app.update(Message::CsvExportCompleted(Ok(Some(report))));
+        assert!(
+            app.last_export_status
+                .as_deref()
+                .is_some_and(|s| s.contains("3 reviews, 5 kana rows, 2 pitch rows"))
+        );
+
+        let _ = app.update(Message::JsonExportCompleted(Ok(Some(PathBuf::from(
+            "/tmp/exports/kotodama_export.json",
+        )))));
+        assert!(
+            app.last_export_status
+                .as_deref()
+                .is_some_and(|s| s.contains("kotodama_export.json"))
+        );
+
+        let _ = app.update(Message::CsvExportCompleted(Err("Permission denied".to_string())));
+        let _ = app.update(Message::JsonExportCompleted(Err("Disk full".to_string())));
+        assert_eq!(app.toasts.len(), 2);
+        assert!(app.toasts.iter().all(|t| t.severity == ErrorSeverity::Error));
     }
 }

@@ -9,7 +9,11 @@ use crate::ui::theme::{self, ThemeTokens};
 use crate::ui::Message;
 
 /// Renders the analytics dashboard with daily streaks, kana confusion preview, and export controls.
-pub fn view<'a>(streak: &'a DailyStreak, resolved_theme: ResolvedTheme) -> Element<'a, Message> {
+pub fn view<'a>(
+    streak: &'a DailyStreak,
+    export_status: Option<&'a str>,
+    resolved_theme: ResolvedTheme,
+) -> Element<'a, Message> {
     let colors = theme::tokens(resolved_theme);
 
     let goal_status = if streak.is_daily_goal_met() {
@@ -84,31 +88,40 @@ pub fn view<'a>(streak: &'a DailyStreak, resolved_theme: ResolvedTheme) -> Eleme
     .padding(20)
     .style(theme::card_style);
 
-    let export_card = container(
-        column![
-            text("Export Session History & Confusion Matrix")
-                .size(17)
-                .color(colors.text_primary),
-            text("Export full pronunciation history, per-kana mistake counts, and pitch accent error logs.")
-                .size(14)
-                .color(colors.text_muted),
-            row![
-                button(text("Export CSV").size(14))
-                    .padding([10, 16])
-                    .style(theme::secondary_button_style)
-                    .on_press(Message::TriggerRecoverableAction),
-                button(text("Export JSON").size(14))
-                    .padding([10, 16])
-                    .style(theme::secondary_button_style)
-                    .on_press(Message::TriggerRecoverableAction),
-            ]
-            .spacing(12),
+    let mut export_col = column![
+        text("Export Session History & Confusion Matrix")
+            .size(17)
+            .color(colors.text_primary),
+        text("Export full pronunciation history, per-kana mistake counts, and pitch accent error logs.")
+            .size(14)
+            .color(colors.text_muted),
+        row![
+            button(text("Export CSV").size(14))
+                .padding([10, 16])
+                .style(theme::secondary_button_style)
+                .on_press(Message::ExportCsvRequested),
+            button(text("Export JSON").size(14))
+                .padding([10, 16])
+                .style(theme::secondary_button_style)
+                .on_press(Message::ExportJsonRequested),
         ]
-        .spacing(10),
-    )
-    .width(Length::Fill)
-    .padding(20)
-    .style(theme::card_style);
+        .spacing(12),
+    ]
+    .spacing(10);
+
+    if let Some(status) = export_status {
+        export_col = export_col.push(
+            container(text(status).size(13).color(colors.sage))
+                .width(Length::Fill)
+                .padding([8, 12])
+                .style(theme::muted_card_style),
+        );
+    }
+
+    let export_card = container(export_col)
+        .width(Length::Fill)
+        .padding(20)
+        .style(theme::card_style);
 
     column![stats_row, goal_card, breakdown_card, export_card]
         .spacing(18)
