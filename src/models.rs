@@ -1699,6 +1699,162 @@ pub struct CsvExportReport {
     pub pitch_rows: usize,
 }
 
+/// Identifies which reference audio clip on a card is targeted during practice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PracticeTargetClip {
+    /// Practice against the card's isolated word audio clip.
+    Word,
+    /// Practice against the card's example sentence audio clip.
+    Sentence,
+}
+
+impl PracticeTargetClip {
+    /// Human-readable label for the selected reference clip button.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Word => "Word Audio",
+            Self::Sentence => "Sentence Audio",
+        }
+    }
+}
+
+/// Precomputed normalized reference pitch contour ready for canvas overlay rendering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceContourPreview {
+    /// Reference `F0` contour in semitones relative to `median_hz` (`None` = unvoiced).
+    pub semitones: Vec<Option<f32>>,
+    /// Reference speaker median `F0` in Hertz.
+    pub median_hz: f32,
+}
+
+/// Complete pronunciation evaluation produced after recording a practice take.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PracticeEvaluationResult {
+    /// Identifier of the evaluated Anki card.
+    pub card_id: i64,
+    /// Practice mode under which the recording was scored.
+    pub mode: PracticeMode,
+    /// Mora clarity evaluation when applicable to the mode.
+    pub mora_evaluation: Option<MoraEvaluation>,
+    /// Pitch contour DTW comparison when applicable to the mode.
+    pub pitch_analysis: Option<PitchAnalysis>,
+    /// Combined numeric score and automated FSRS rating recommendation.
+    pub breakdown: CombinedScoreBreakdown,
+    /// Active drill duration in milliseconds.
+    pub duration_ms: u64,
+    /// UTC timestamp when evaluation finished.
+    pub evaluated_at: DateTime<Utc>,
+}
+
+/// Visual beat state during the pre-recording Combined Shadowing countdown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowingCountdownState {
+    /// Number of countdown beats remaining (`1..=total_beats`).
+    pub beats_remaining: u8,
+    /// Total number of countdown beats before recording begins.
+    pub total_beats: u8,
+    /// Progress across the entire countdown normalized to `0.0..=1.0`.
+    pub beat_progress: f32,
+}
+
+impl ShadowingCountdownState {
+    /// Computes the countdown beat state for `elapsed_ms`, or `None` once the countdown completes.
+    pub fn from_elapsed_ms(
+        elapsed_ms: u64,
+        total_beats: u8,
+        beat_duration_ms: u64,
+    ) -> Option<Self> {
+        if total_beats == 0 || beat_duration_ms == 0 {
+            return None;
+        }
+        let total_ms = u64::from(total_beats).saturating_mul(beat_duration_ms);
+        if elapsed_ms >= total_ms {
+            return None;
+        }
+        let completed_beats = (elapsed_ms / beat_duration_ms) as u8;
+        let beats_remaining = total_beats.saturating_sub(completed_beats).max(1);
+        let beat_progress = (elapsed_ms as f32 / total_ms as f32).clamp(0.0, 1.0);
+        Some(Self {
+            beats_remaining,
+            total_beats,
+            beat_progress,
+        })
+    }
+}
+
+/// Aggregated metrics displayed at the end of a practice session.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PracticeSessionSummary {
+    /// Total cards rated and persisted during this session.
+    pub cards_completed: u32,
+    /// Total active session duration in milliseconds.
+    pub session_duration_ms: u64,
+    /// Mean combined score percentage across evaluated cards in this session.
+    pub average_score_percent: Option<f32>,
+    /// Mean mora clarity percentage across mora-scored cards in this session.
+    pub average_mora_accuracy_percent: Option<f32>,
+    /// Mean pitch accent error percentage across pitch-scored cards in this session.
+    pub average_pitch_error_percent: Option<f32>,
+    /// Whether the user's configured daily goal cap was reached during this session.
+    pub daily_cap_reached: bool,
+    /// Number of cards whose FSRS rating was manually overridden.
+    pub override_count: u32,
+}
+
+/// Logical keyboard shortcut action supported on the Practice screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PracticeShortcutAction {
+    /// Play the current card's reference audio (`Space`).
+    PlayReference,
+    /// Start or stop microphone recording (`R`).
+    ToggleRecord,
+    /// Play back the user's most recent recorded take (`T`).
+    PlayUserTake,
+    /// Apply a manual FSRS rating override (`1`–`4`).
+    RateCard(FsrsRating),
+    /// Toggle Blind / Audio-Only card text hiding (`B`).
+    ToggleBlindMode,
+    /// Toggle between `0.75x` slow and `1.0x` normal playback speed (`S`).
+    TogglePlaybackSpeed,
+    /// Accept the automated FSRS rating recommendation (`Enter`).
+    AcceptRecommended,
+    /// Stop an active recording or cancel an active countdown (`Esc`).
+    CancelActive,
+}
+
+/// Semantic visual state for mora chips in Mora Purity and Combined Shadowing views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MoraChipTone {
+    /// Neutral ungraded target mora chip.
+    Neutral,
+    /// Target mora matched a valid realization.
+    Clear,
+    /// Target mora was substituted or classified as unknown.
+    Mistake,
+}
+
+/// Deck readiness counts passed into the Practice view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PracticeDeckStatus {
+    /// Whether an Anki deck is configured in the workspace.
+    pub has_deck: bool,
+    /// Number of active non-excluded learned cards ready for practice.
+    pub active_card_count: usize,
+    /// Number of excluded cards skipped for the active deck.
+    pub excluded_card_count: usize,
+}
+
+/// Live microphone telemetry snapshot passed into the Practice view.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PracticeMicViewState {
+    /// Whether Practice microphone capture is currently active.
+    pub is_recording: bool,
+    /// Most recent microphone level snapshot.
+    pub mic_level: MicLevelSnapshot,
+    /// Elapsed milliseconds in the active recording session.
+    pub elapsed_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2286,5 +2442,32 @@ mod tests {
         };
         assert_eq!(csv_report.review_rows, 1);
         Ok(())
+    }
+
+    #[test]
+    fn phase_5_practice_models_validate_countdown_and_clip_labels() {
+        assert_eq!(PracticeTargetClip::Word.label(), "Word Audio");
+        assert_eq!(PracticeTargetClip::Sentence.label(), "Sentence Audio");
+
+        assert_eq!(ShadowingCountdownState::from_elapsed_ms(0, 0, 500), None);
+        assert_eq!(ShadowingCountdownState::from_elapsed_ms(0, 3, 0), None);
+
+        let beat_3 = ShadowingCountdownState::from_elapsed_ms(0, 3, 500)
+            .expect("0ms should start at beat 3");
+        assert_eq!(beat_3.beats_remaining, 3);
+        assert_eq!(beat_3.total_beats, 3);
+        assert!((beat_3.beat_progress - 0.0).abs() < 1e-6);
+
+        let beat_2 = ShadowingCountdownState::from_elapsed_ms(500, 3, 500)
+            .expect("500ms should transition to beat 2");
+        assert_eq!(beat_2.beats_remaining, 2);
+        assert!((beat_2.beat_progress - (1.0 / 3.0)).abs() < 1e-4);
+
+        let beat_1 = ShadowingCountdownState::from_elapsed_ms(1499, 3, 500)
+            .expect("1499ms should remain on beat 1");
+        assert_eq!(beat_1.beats_remaining, 1);
+
+        assert_eq!(ShadowingCountdownState::from_elapsed_ms(1500, 3, 500), None);
+        assert_eq!(ShadowingCountdownState::from_elapsed_ms(2200, 3, 500), None);
     }
 }

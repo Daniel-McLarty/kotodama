@@ -158,6 +158,38 @@ impl FsrsScheduler {
         daily_goal: DailyGoal,
         now: DateTime<Utc>,
     ) -> Result<(i64, FsrsSchedulingOutcome, DailyStreak)> {
+        let streak_minutes_to_add = (duration_ms / 60_000) as u32;
+        self.record_review_with_streak_minutes(
+            db,
+            card,
+            breakdown,
+            mora_attempts,
+            thresholds,
+            manual_override,
+            dtw_distance,
+            duration_ms,
+            streak_minutes_to_add,
+            daily_goal,
+            now,
+        )
+    }
+
+    /// Evaluates FSRS scheduling for `card`, recording exact `duration_ms` while adding `streak_minutes_to_add` to daily streak minutes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_review_with_streak_minutes(
+        &self,
+        db: &mut KotodamaDb,
+        card: &AnkiCard,
+        breakdown: &CombinedScoreBreakdown,
+        mora_attempts: &[MoraAttempt],
+        thresholds: &ScoreThresholds,
+        manual_override: Option<FsrsRating>,
+        dtw_distance: Option<f32>,
+        duration_ms: u64,
+        streak_minutes_to_add: u32,
+        daily_goal: DailyGoal,
+        now: DateTime<Utc>,
+    ) -> Result<(i64, FsrsSchedulingOutcome, DailyStreak)> {
         let existing = db.get_fsrs_state(card.card_id)?;
         let outcome = self.schedule_card(
             card.card_id,
@@ -186,13 +218,12 @@ impl FsrsScheduler {
             reviewed_at: now,
         };
 
-        let minutes_spent = (duration_ms / 60_000) as u32;
         let (review_id, streak) = db.commit_review_transaction(
             &review,
             mora_attempts,
             &outcome.next_state,
             now.date_naive(),
-            minutes_spent,
+            streak_minutes_to_add,
             daily_goal,
         )?;
 
@@ -402,6 +433,55 @@ mod tests {
         assert_eq!(db.list_review_logs(None)?.len(), 1);
         assert!(db.get_kana_stats("み")?.is_some());
         assert!(db.get_kana_stats("ず")?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn record_review_with_streak_minutes_separates_card_duration_from_accumulated_minutes() -> Result<()> {
+        let mut db = KotodamaDb::open_in_memory()?;
+        let scheduler = FsrsScheduler::default_scheduler()?;
+        let thresholds = ScoreThresholds::default();
+        let now = ts(2026, 11, 26, 16);
+
+        let card = AnkiCard {
+            card_id: 777,
+            note_id: 888,
+            deck_name: "Core 2k".to_string(),
+            word: "猫".to_string(),
+            kana: "ねこ".to_string(),
+            sentence: None,
+            word_audio: "neko.mp3".to_string(),
+            sentence_audio: None,
+            anki_queue: AnkiCard::LEARNED_QUEUE,
+            audio_issues: Vec::new(),
+            last_pitch_error_percent: None,
+        };
+        let breakdown = combine_practice_score(
+            PracticeMode::MoraPurity,
+            Some(92.0),
+            None,
+            &thresholds,
+        )?;
+
+        let (review_id, _outcome, streak) = scheduler.record_review_with_streak_minutes(
+            &mut db,
+            &card,
+            &breakdown,
+            &[],
+            &thresholds,
+            None,
+            None,
+            12_500,
+            2,
+            DailyGoal::Minutes(5),
+            now,
+        )?;
+
+        assert_eq!(streak.minutes_practiced_today, 2);
+        let logs = db.list_review_logs(None)?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].id, Some(review_id));
+        assert_eq!(logs[0].duration_ms, 12_500);
         Ok(())
     }
 }
