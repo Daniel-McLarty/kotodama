@@ -406,16 +406,18 @@ impl KotodamaApp {
         match storage::default_database_path() {
             Ok(db_path) => match KotodamaDb::open(&db_path) {
                 Ok(db) => {
-                    match db.load_daily_streak() {
-                        Ok(mut streak) => {
-                            streak.daily_goal = app.settings.daily_goal;
-                            app.streak = streak;
+                    match db.load_dashboard_snapshot() {
+                        Ok(mut snapshot) => {
+                            snapshot.streak.daily_goal = app.settings.daily_goal;
+                            app.streak = snapshot.streak.clone();
+                            app.dashboard_state.snapshot = snapshot;
+                            app.dashboard_state.has_loaded = true;
                         }
                         Err(err) => {
                             app.report_warning(
-                                "Streak History Unavailable",
+                                "Dashboard History Unavailable",
                                 format!("{err:#}"),
-                                Some("Daily streak counters will use fresh session state.".to_string()),
+                                Some("Daily streak counters and analytics will refresh once the database is readable.".to_string()),
                             );
                         }
                     }
@@ -547,6 +549,9 @@ impl KotodamaApp {
                     self.stop_practice_audio_and_countdown();
                 }
                 self.active_tab = tab;
+                if tab == NavTab::Dashboard {
+                    return self.launch_dashboard_refresh();
+                }
             }
             Message::SelectPracticeMode(mode) => {
                 self.active_mode = mode;
@@ -591,12 +596,14 @@ impl KotodamaApp {
                 let goal = DailyGoal::Cards(cards);
                 self.settings.daily_goal = goal;
                 self.streak.daily_goal = goal;
+                self.dashboard_state.snapshot.streak.daily_goal = goal;
                 self.persist_settings();
             }
             Message::SetDailyGoalMinutes(minutes) => {
                 let goal = DailyGoal::Minutes(minutes);
                 self.settings.daily_goal = goal;
                 self.streak.daily_goal = goal;
+                self.dashboard_state.snapshot.streak.daily_goal = goal;
                 self.persist_settings();
             }
             Message::SetScoreThresholds(thresholds) => match thresholds.validate() {
@@ -1408,6 +1415,7 @@ impl KotodamaApp {
                 match result {
                     Ok((outcome, streak, latest_pitch)) => {
                         self.streak = streak;
+                        self.dashboard_state.snapshot.streak = self.streak.clone();
                         if let Some(pitch_err) = latest_pitch
                             && let Some(card) = self.practice_state.current_card()
                         {
@@ -1546,14 +1554,64 @@ impl KotodamaApp {
                     Some("Choose a valid collection.anki2 file or retry AnkiConnect.".to_string()),
                 );
             }
-            Message::DashboardRefreshRequested
-            | Message::DashboardLoaded(_)
-            | Message::DashboardSelectTimeRange(_)
-            | Message::DashboardSelectKanaSort(_)
-            | Message::DashboardKanaFilterChanged(_)
-            | Message::DashboardSelectKana(_)
-            | Message::DashboardPitchCardFilterChanged(_)
-            | Message::DashboardSelectPitchCard(_) => {}
+            Message::DashboardRefreshRequested => {
+                return self.launch_dashboard_refresh();
+            }
+            Message::DashboardLoaded(result) => {
+                self.dashboard_state.is_loading = false;
+                match result {
+                    Ok(mut snapshot) => {
+                        snapshot.streak.daily_goal = self.settings.daily_goal;
+                        self.streak = snapshot.streak.clone();
+
+                        if let Some(selected_kana) = &self.dashboard_state.selected_kana
+                            && !snapshot
+                                .kana_stats
+                                .iter()
+                                .any(|stats| &stats.kana == selected_kana)
+                        {
+                            self.dashboard_state.selected_kana = None;
+                        }
+                        if let Some(selected_card_id) = self.dashboard_state.selected_pitch_card_id
+                            && !snapshot
+                                .card_pitch_summaries
+                                .iter()
+                                .any(|summary| summary.card_id == selected_card_id)
+                        {
+                            self.dashboard_state.selected_pitch_card_id = None;
+                        }
+
+                        self.dashboard_state.snapshot = snapshot;
+                        self.dashboard_state.has_loaded = true;
+                    }
+                    Err(err_msg) => {
+                        let err = anyhow::anyhow!(err_msg);
+                        self.report_error(
+                            "Dashboard Refresh Failed",
+                            &err,
+                            Some("Ensure your local Kotodama database is accessible and click Refresh.".to_string()),
+                        );
+                    }
+                }
+            }
+            Message::DashboardSelectTimeRange(range) => {
+                self.dashboard_state.time_range = range;
+            }
+            Message::DashboardSelectKanaSort(order) => {
+                self.dashboard_state.kana_sort = order;
+            }
+            Message::DashboardKanaFilterChanged(query) => {
+                self.dashboard_state.kana_filter = query;
+            }
+            Message::DashboardSelectKana(kana) => {
+                self.dashboard_state.selected_kana = kana;
+            }
+            Message::DashboardPitchCardFilterChanged(query) => {
+                self.dashboard_state.pitch_card_filter = query;
+            }
+            Message::DashboardSelectPitchCard(card_id) => {
+                self.dashboard_state.selected_pitch_card_id = card_id;
+            }
             Message::DismissToast(id) => {
                 self.toasts.retain(|toast| toast.id != id);
             }
@@ -2439,6 +2497,31 @@ impl KotodamaApp {
         let id = self.next_toast_id;
         self.next_toast_id = self.next_toast_id.saturating_add(1);
         id
+    }
+
+    fn launch_dashboard_refresh(&mut self) -> Task<Message> {
+        let db_path = match self
+            .db_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Local database path is unavailable."))
+            .or_else(|_| storage::default_database_path())
+        {
+            Ok(path) => path,
+            Err(err) => {
+                self.report_warning(
+                    "Dashboard Refresh Unavailable",
+                    format!("{err:#}"),
+                    Some("Ensure your system data directory is writable.".to_string()),
+                );
+                return Task::none();
+            }
+        };
+
+        self.dashboard_state.is_loading = true;
+        Task::perform(
+            run_blocking(move || KotodamaDb::open(&db_path)?.load_dashboard_snapshot()),
+            Message::DashboardLoaded,
+        )
     }
 
     fn persist_settings(&mut self) {
@@ -4028,5 +4111,80 @@ mod tests {
             assert!(eval.breakdown.combined_score_percent.is_finite());
         }
         Ok(())
+    }
+
+    #[test]
+    fn dashboard_messages_update_snapshot_filters_and_handle_errors_safely() {
+        let mut app = KotodamaApp::default();
+        app.settings.daily_goal = DailyGoal::Minutes(15);
+        app.dashboard_state.is_loading = true;
+        app.dashboard_state.selected_kana = Some("ぬ".to_string());
+        app.dashboard_state.selected_pitch_card_id = Some(999);
+
+        let snapshot = DashboardSnapshot {
+            streak: DailyStreak {
+                current_streak_days: 4,
+                longest_streak_days: 7,
+                total_sessions: 12,
+                cards_practiced_today: 5,
+                minutes_practiced_today: 8,
+                last_practice_date: Some(
+                    chrono::NaiveDate::from_ymd_opt(2026, 11, 27).unwrap_or(chrono::NaiveDate::MIN),
+                ),
+                daily_goal: DailyGoal::Cards(10),
+            },
+            total_reviews: 12,
+            overall_mora_accuracy_percent: Some(88.5),
+            overall_pitch_error_percent: Some(14.0),
+            tracked_kana_count: 1,
+            daily_series: Vec::new(),
+            kana_stats: vec![crate::models::KanaStats::new("つ")],
+            card_pitch_summaries: vec![crate::models::CardPitchSummary {
+                card_id: 42,
+                deck_name: "Core 2k".to_string(),
+                word: "橋".to_string(),
+                kana: "はし".to_string(),
+                review_count: 2,
+                latest_pitch_error_percent: 14.0,
+                average_pitch_error_percent: 16.0,
+                best_pitch_error_percent: 14.0,
+                latest_dtw_distance: 0.7,
+                last_reviewed_at: Utc::now(),
+                recent_errors: vec![18.0, 14.0],
+            }],
+            pitch_error_logs: Vec::new(),
+        };
+
+        let _ = app.update(Message::DashboardLoaded(Ok(snapshot)));
+        assert!(!app.dashboard_state.is_loading);
+        assert!(app.dashboard_state.has_loaded);
+        assert_eq!(app.streak.current_streak_days, 4);
+        assert_eq!(app.streak.daily_goal, DailyGoal::Minutes(15));
+        assert_eq!(
+            app.dashboard_state.snapshot.streak.daily_goal,
+            DailyGoal::Minutes(15)
+        );
+        assert_eq!(app.dashboard_state.selected_kana, None);
+        assert_eq!(app.dashboard_state.selected_pitch_card_id, None);
+
+        let _ = app.update(Message::DashboardSelectTimeRange(DashboardTimeRange::Last7Days));
+        let _ = app.update(Message::DashboardSelectKanaSort(KanaSortOrder::MostPracticed));
+        let _ = app.update(Message::DashboardKanaFilterChanged("つ".to_string()));
+        let _ = app.update(Message::DashboardSelectKana(Some("つ".to_string())));
+        let _ = app.update(Message::DashboardPitchCardFilterChanged("橋".to_string()));
+        let _ = app.update(Message::DashboardSelectPitchCard(Some(42)));
+
+        assert_eq!(app.dashboard_state.time_range, DashboardTimeRange::Last7Days);
+        assert_eq!(app.dashboard_state.kana_sort, KanaSortOrder::MostPracticed);
+        assert_eq!(app.dashboard_state.kana_filter, "つ");
+        assert_eq!(app.dashboard_state.selected_kana.as_deref(), Some("つ"));
+        assert_eq!(app.dashboard_state.pitch_card_filter, "橋");
+        assert_eq!(app.dashboard_state.selected_pitch_card_id, Some(42));
+
+        app.dashboard_state.is_loading = true;
+        let _ = app.update(Message::DashboardLoaded(Err("Database locked".to_string())));
+        assert!(!app.dashboard_state.is_loading);
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].severity, ErrorSeverity::Error);
     }
 }

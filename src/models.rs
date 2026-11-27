@@ -1996,6 +1996,7 @@ pub struct DashboardSnapshot {
 
 impl DashboardSnapshot {
     /// Returns `true` when no review, kana, or pitch history has been recorded yet.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.total_reviews == 0
             && self.kana_stats.is_empty()
