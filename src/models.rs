@@ -1855,6 +1855,172 @@ pub struct PracticeMicViewState {
     pub elapsed_ms: u64,
 }
 
+/// Time window used to filter trend charts on the Analytics Dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum DashboardTimeRange {
+    /// Displays the most recent 7 calendar days including today.
+    Last7Days,
+    /// Displays the most recent 30 calendar days including today.
+    #[default]
+    Last30Days,
+    /// Displays the complete recorded practice history.
+    AllTime,
+}
+
+impl DashboardTimeRange {
+    /// Ordered list of all dashboard time-range options.
+    pub const ALL: [Self; 3] = [Self::Last7Days, Self::Last30Days, Self::AllTime];
+
+    /// Short human-readable label for dashboard filter pills.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Last7Days => "7 Days",
+            Self::Last30Days => "30 Days",
+            Self::AllTime => "All Time",
+        }
+    }
+
+    /// Maximum number of calendar days included in this range, or `None` for all history.
+    pub const fn max_days(self) -> Option<i64> {
+        match self {
+            Self::Last7Days => Some(7),
+            Self::Last30Days => Some(30),
+            Self::AllTime => None,
+        }
+    }
+}
+
+/// Sort order applied to the per-kana clarity breakdown list on the Dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum KanaSortOrder {
+    /// Orders kana with the lowest accuracy percentage first for targeted drilling.
+    #[default]
+    LowestAccuracy,
+    /// Orders kana with the highest total attempt counts first.
+    MostPracticed,
+    /// Orders kana lexicographically by character.
+    Alphabetical,
+}
+
+impl KanaSortOrder {
+    /// Ordered list of all kana sorting options.
+    pub const ALL: [Self; 3] = [
+        Self::LowestAccuracy,
+        Self::MostPracticed,
+        Self::Alphabetical,
+    ];
+
+    /// Short human-readable label for kana sort pills.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LowestAccuracy => "Lowest Accuracy",
+            Self::MostPracticed => "Most Practiced",
+            Self::Alphabetical => "Kana Order",
+        }
+    }
+}
+
+/// Aggregated per-card pitch accent error summary and recent trend samples.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CardPitchSummary {
+    /// Associated Anki card ID.
+    pub card_id: i64,
+    /// Name of the Anki deck containing this card.
+    pub deck_name: String,
+    /// Target Japanese word or expression.
+    pub word: String,
+    /// Target kana reading.
+    pub kana: String,
+    /// Number of pitch-scored reviews recorded for this card.
+    pub review_count: u64,
+    /// Most recent pitch accent error percentage (`0.0..=100.0`).
+    pub latest_pitch_error_percent: f32,
+    /// Mean pitch accent error percentage across all recorded reviews.
+    pub average_pitch_error_percent: f32,
+    /// Lowest (best) pitch accent error percentage achieved on this card.
+    pub best_pitch_error_percent: f32,
+    /// Mean semitone DTW distance from the most recent review.
+    pub latest_dtw_distance: f32,
+    /// UTC timestamp of the most recent pitch-scored review.
+    pub last_reviewed_at: DateTime<Utc>,
+    /// Chronological oldest-to-newest pitch error % samples (up to the last 12 reviews).
+    pub recent_errors: Vec<f32>,
+}
+
+impl CardPitchSummary {
+    /// Formats a concise human-readable label for pitch history lists.
+    pub fn display_label(&self) -> String {
+        let word = self.word.trim();
+        let kana = self.kana.trim();
+        match (word.is_empty(), kana.is_empty()) {
+            (false, false) if word != kana => format!("{word} ({kana})"),
+            (false, _) => word.to_string(),
+            (true, false) => kana.to_string(),
+            (true, true) => format!("Card #{}", self.card_id),
+        }
+    }
+
+    /// Returns the net change in pitch error percentage across `recent_errors` (`latest - earliest`), or `None` with fewer than 2 samples.
+    pub fn trend_delta_percent(&self) -> Option<f32> {
+        let first = self.recent_errors.first().copied()?;
+        let last = self.recent_errors.last().copied()?;
+        if self.recent_errors.len() < 2 {
+            return None;
+        }
+        Some(last - first)
+    }
+}
+
+/// Complete analytics snapshot loaded from SQLite for the Dashboard view.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DashboardSnapshot {
+    /// Persisted daily streak and goal completion counters.
+    pub streak: DailyStreak,
+    /// Total number of pronunciation reviews recorded in SQLite.
+    pub total_reviews: u64,
+    /// Mean mora clarity percentage across all reviews with mora scores.
+    pub overall_mora_accuracy_percent: Option<f32>,
+    /// Mean pitch accent error percentage across all reviews with pitch scores.
+    pub overall_pitch_error_percent: Option<f32>,
+    /// Number of distinct kana with recorded clarity statistics.
+    pub tracked_kana_count: usize,
+    /// Daily aggregated accuracy and pitch error time-series sorted chronologically.
+    pub daily_series: Vec<DailyAccuracyPoint>,
+    /// Per-kana clarity and confusion statistics across all recorded mora attempts.
+    pub kana_stats: Vec<KanaStats>,
+    /// Per-card pitch accent error summaries sorted by highest recent error first.
+    pub card_pitch_summaries: Vec<CardPitchSummary>,
+    /// Detailed per-review pitch error logs ordered newest first.
+    pub pitch_error_logs: Vec<PitchErrorLogEntry>,
+}
+
+impl DashboardSnapshot {
+    /// Returns `true` when no review, kana, or pitch history has been recorded yet.
+    pub fn is_empty(&self) -> bool {
+        self.total_reviews == 0
+            && self.kana_stats.is_empty()
+            && self.pitch_error_logs.is_empty()
+    }
+
+    /// Returns daily time-series points falling within `range` relative to `today`.
+    pub fn filtered_series(
+        &self,
+        range: DashboardTimeRange,
+        today: NaiveDate,
+    ) -> Vec<&DailyAccuracyPoint> {
+        match range.max_days() {
+            Some(days) => {
+                let cutoff = today - chrono::Duration::days(days.saturating_sub(1));
+                self.daily_series
+                    .iter()
+                    .filter(|point| point.date >= cutoff)
+                    .collect()
+            }
+            None => self.daily_series.iter().collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2469,5 +2635,93 @@ mod tests {
 
         assert_eq!(ShadowingCountdownState::from_elapsed_ms(1500, 3, 500), None);
         assert_eq!(ShadowingCountdownState::from_elapsed_ms(2200, 3, 500), None);
+    }
+
+    #[test]
+    fn phase_6_dashboard_models_filter_series_and_compute_pitch_trends() {
+        assert_eq!(DashboardTimeRange::default(), DashboardTimeRange::Last30Days);
+        assert_eq!(DashboardTimeRange::Last7Days.label(), "7 Days");
+        assert_eq!(DashboardTimeRange::Last7Days.max_days(), Some(7));
+        assert_eq!(DashboardTimeRange::Last30Days.max_days(), Some(30));
+        assert_eq!(DashboardTimeRange::AllTime.max_days(), None);
+
+        assert_eq!(KanaSortOrder::default(), KanaSortOrder::LowestAccuracy);
+        assert_eq!(KanaSortOrder::MostPracticed.label(), "Most Practiced");
+        assert_eq!(KanaSortOrder::Alphabetical.label(), "Kana Order");
+
+        let mut summary = CardPitchSummary {
+            card_id: 7,
+            deck_name: "Core 2k".to_string(),
+            word: "橋".to_string(),
+            kana: "はし".to_string(),
+            review_count: 1,
+            latest_pitch_error_percent: 24.0,
+            average_pitch_error_percent: 24.0,
+            best_pitch_error_percent: 24.0,
+            latest_dtw_distance: 1.2,
+            last_reviewed_at: sample_time(),
+            recent_errors: vec![],
+        };
+        assert_eq!(summary.display_label(), "橋 (はし)");
+        assert_eq!(summary.trend_delta_percent(), None);
+
+        summary.recent_errors = vec![24.0];
+        assert_eq!(summary.trend_delta_percent(), None);
+
+        summary.recent_errors = vec![30.0, 22.0, 14.5];
+        let delta = summary
+            .trend_delta_percent()
+            .expect("multi-sample pitch history should yield delta");
+        assert!((delta - (-15.5)).abs() < 1e-5);
+
+        let same_kana = CardPitchSummary {
+            word: "みず".to_string(),
+            kana: "みず".to_string(),
+            ..summary.clone()
+        };
+        assert_eq!(same_kana.display_label(), "みず");
+
+        let blank_card = CardPitchSummary {
+            word: "  ".to_string(),
+            kana: "".to_string(),
+            ..summary.clone()
+        };
+        assert_eq!(blank_card.display_label(), "Card #7");
+
+        let empty_snap = DashboardSnapshot::default();
+        assert!(empty_snap.is_empty());
+
+        let today = NaiveDate::from_ymd_opt(2026, 11, 27).unwrap_or(NaiveDate::MIN);
+        let snap = DashboardSnapshot {
+            total_reviews: 3,
+            daily_series: vec![
+                DailyAccuracyPoint {
+                    date: today - chrono::Duration::days(40),
+                    review_count: 1,
+                    avg_mora_accuracy_percent: Some(70.0),
+                    avg_pitch_error_percent: Some(25.0),
+                    avg_combined_score_percent: 72.5,
+                },
+                DailyAccuracyPoint {
+                    date: today - chrono::Duration::days(10),
+                    review_count: 2,
+                    avg_mora_accuracy_percent: Some(80.0),
+                    avg_pitch_error_percent: Some(18.0),
+                    avg_combined_score_percent: 81.0,
+                },
+                DailyAccuracyPoint {
+                    date: today - chrono::Duration::days(2),
+                    review_count: 3,
+                    avg_mora_accuracy_percent: Some(88.0),
+                    avg_pitch_error_percent: Some(12.0),
+                    avg_combined_score_percent: 88.0,
+                },
+            ],
+            ..DashboardSnapshot::default()
+        };
+        assert!(!snap.is_empty());
+        assert_eq!(snap.filtered_series(DashboardTimeRange::Last7Days, today).len(), 1);
+        assert_eq!(snap.filtered_series(DashboardTimeRange::Last30Days, today).len(), 2);
+        assert_eq!(snap.filtered_series(DashboardTimeRange::AllTime, today).len(), 3);
     }
 }
