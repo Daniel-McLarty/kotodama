@@ -2,6 +2,8 @@
 
 /// Local SQLite database persistence for streaks, review logs, kana clarity, and FSRS states.
 pub mod db;
+/// CSV and JSON data exporters for review history, kana confusion matrices, and pitch logs.
+pub mod export;
 
 use std::fs;
 use std::io::ErrorKind;
