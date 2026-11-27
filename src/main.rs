@@ -3,6 +3,7 @@
 mod anki;
 mod audio;
 mod models;
+mod scoring;
 mod storage;
 mod ui;
 
