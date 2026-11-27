@@ -21,16 +21,16 @@
   - Tracks daily streaks, configurable daily goals (cards or minutes), accuracy over time, per-card pitch error %, and top-5 confusion matrices per kana (e.g., `つ: 82% correct — 5% す, 4% ず, 3% すう, 6% unknown`).
   - Exports session history, confusion matrices, and pitch error logs to **CSV** and **JSON**.
 
-## Current Status (`v0.4.0`)
+## Current Status (`v0.5.0`)
 
-Phase 4 (Mora Scoring, FSRS Bridge & Local DB) is complete:
+Phase 5 (Practice Views & Ergonomics) is complete:
+- Interactive **Practice** workflows (`src/ui/practice.rs`, `src/ui/mod.rs`) for **Mora Purity**, **Pitch Accent** (with an Iced `Canvas` semitone pitch contour overlay), and **Combined Shadowing** (with a `3 · 2 · 1` visual countdown and auto-record flow).
+- Keyboard-first Practice shortcuts (`Space`, `R`, `T`, `1`–`4`, `Enter`, `B`, `S`, `Esc`) with physical-key support under Japanese IMEs, **Blind / Audio-Only Mode** with automatic post-take reveal, `0.75x`/`1.0x` WSOLA playback, and **Daily Session Cap** enforcement for both card and minute goals (with **Continue Extra Practice** override).
 - Local SQLite persistence (`src/storage/db.rs`) tracking daily streaks, review logs, per-kana confusion matrices, pitch error logs, and independent `fsrs` scheduling states without modifying Anki databases.
-- Pluggable `MoraScorer` trait and pure-Rust `HeuristicAcousticMoraScorer` (`src/scoring/mora.rs`) implementing Japanese allophone and high-vowel devoicing rules (が-row `[g]`/`[ŋ]`, devoiced high vowels holding a full mora beat, assimilated `ん` nasals, and `じ`/`ぢ` + `ず`/`づ` equivalence) plus top-5 confusion aggregation.
-- Combined scoring and FSRS bridge (`src/scoring/pitch.rs`, `src/scoring/fsrs_bridge.rs`) with interactive `Lenient`, `Balanced`, and `Strict` threshold presets in Settings and manual rating override support.
-- UTF-8 CSV and JSON exporters (`src/storage/export.rs`) wired to the Dashboard **Export CSV** and **Export JSON** buttons.
-- Cross-platform `cpal` microphone capture, VAD silence trimming/auto-stop, pitch-preserving `0.75x` / `1.0x` WSOLA playback, YIN `F0` + DTW pitch engine, safe `collection.anki2` / `AnkiConnect` ingestion (`queue = 2`), interactive 5-field Setup mapper, GIGO audio checks, per-deck exclusions, and adaptive Light/Dark mode.
+- Pluggable `MoraScorer` trait and pure-Rust `HeuristicAcousticMoraScorer` (`src/scoring/mora.rs`) implementing Japanese allophone and high-vowel devoicing rules plus top-5 confusion aggregation.
+- UTF-8 CSV and JSON exporters (`src/storage/export.rs`), `cpal` microphone capture & VAD calibration, YIN `F0` + DTW pitch engine, safe `collection.anki2` / `AnkiConnect` ingestion (`queue = 2`), interactive 5-field Setup mapper, GIGO audio checks, per-deck exclusions, and adaptive Light/Dark mode.
 
-Upcoming phases add interactive Practice Canvases & keyboard-first drills (`v0.5.0`) and full Analytics Dashboard charts (`v0.6.0`).
+Upcoming phases add the full Analytics Dashboard charts & confusion breakdown UI (`v0.6.0`).
 
 ## Connecting an Anki Deck & Mapping Fields
 
@@ -42,14 +42,18 @@ Upcoming phases add interactive Practice Canvases & keyboard-first drills (`v0.5
 4. Click **Validate Audio & Save Deck** to run GIGO pre-flight checks across all learned cards and persist your deck mapping locally.
 5. Optionally click **Exclude Card** in the card preview or **Auto-Exclude Invalid Audio Cards** in the GIGO banner to filter problematic cards out of active practice queues (you can inspect or restore excluded cards anytime in Setup or Settings).
 
-## Planned Keyboard Shortcuts
+## Keyboard Shortcuts (Practice Tab)
 
 | Shortcut | Action |
 | :--- | :--- |
-| `Space` | Play reference audio |
+| `Space` | Play reference audio (and start shadowing countdown in Combined Shadowing when auto-record is on) |
 | `R` | Start / stop microphone recording |
 | `T` | Play your recorded take |
 | `1` – `4` | Manual FSRS rating override (`1`: Again, `2`: Hard, `3`: Good, `4`: Easy) |
+| `Enter` | Accept the automated FSRS rating recommendation |
+| `B` | Toggle Blind / Audio-Only Mode |
+| `S` | Toggle `0.75x` / `1.0x` playback speed |
+| `Esc` | Stop active recording or cancel shadowing countdown |
 
 ## Building & Running
 

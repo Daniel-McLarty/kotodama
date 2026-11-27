@@ -23,7 +23,7 @@ Execute one phase at a time. Commit and push logically after each meaningful uni
   - Implement `src/scoring/mora.rs` (pluggable scorer + top-5 mistakes aggregation) and `src/scoring/fsrs_bridge.rs` (configurable score-to-rating thresholds + manual override).
   - Implement CSV and JSON exporters in `src/storage/export.rs`.
 
-- [ ] **Phase 5: Practice Views & Ergonomics (`v0.5.0`)**
+- [x] **Phase 5: Practice Views & Ergonomics (`v0.5.0`)**
   - Build Mora Purity, Pitch Testing (with Iced `Canvas` pitch contour overlay), and Combined Shadowing screens.
   - Wire up keyboard-first shortcuts (`Space`, `R`, `T`, `1–4`), Blind/Audio-Only mode, and Daily Session Cap tracking.
 

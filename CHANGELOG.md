@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-26
+
+### Added
+- Complete interactive **Practice** screen (`src/ui/practice.rs`) supporting Lobby, Loading, Active Card, and Session Summary phases with FSRS due-queue ordering, `Again` card once-per-session re-queuing, and **Extra Study** mode.
+- Three dedicated pronunciation drill views:
+  - **Mora Purity** with interactive per-mora chips, click-to-inspect Japanese allophone/devoicing guidance (`mora_equivalence_rule`), and post-take clarity/confusion chip results.
+  - **Pitch Accent** with `PitchContourProgram` Iced `Canvas` rendering overlaid normalized reference (`sage`) and user (`coral`) `F0` semitone contours split cleanly across unvoiced gaps, plus pitch error %, accuracy %, and DTW semitone metrics.
+  - **Combined Shadowing** with a `3 · 2 · 1` visual countdown (`ShadowingCountdownState`), automatic recording after reference playback, and simultaneous 50/50 mora + pitch scoring.
+- Keyboard-first Practice controls (`Space` play reference, `R` start/stop recording, `T` play your take, `1`–`4` manual FSRS rating override, `Enter` accept recommended rating, `B` Blind Mode, `S` `0.75x`/`1.0x` playback speed, `Esc` stop/cancel) with physical-key fallback when a Japanese IME is active.
+- Blind / Audio-Only Mode card masking with automatic text reveal after recording finishes, live session elapsed timer, daily card/minute cap enforcement with **Continue Extra Practice** override, and Settings minute-goal presets (`5`, `10`, `15 min`).
+- Centralized Phase 5 models in `src/models.rs` (`PracticeTargetClip`, `ReferenceContourPreview`, `PracticeEvaluationResult`, `ShadowingCountdownState`, `PracticeSessionSummary`, `PracticeShortcutAction`, `MoraChipTone`, `PracticeDeckStatus`, `PracticeMicViewState`), adaptive practice button styles in `src/ui/theme.rs`, and `FsrsScheduler::record_review_with_streak_minutes` in `src/scoring/fsrs_bridge.rs`.
+
+### Changed
+- Wired `KotodamaApp` (`src/ui/mod.rs`) to orchestrate background reference audio decoding/`F0` extraction, live Practice `cpal` recording, WSOLA `0.75x`/`1.0x` playback, background mora/pitch scoring, and atomic SQLite/FSRS persistence.
+
 ## [0.4.0] - 2026-11-26
 
 ### Added
