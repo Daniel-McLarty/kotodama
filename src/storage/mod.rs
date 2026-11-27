@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
+/// Local SQLite database persistence for streaks, review logs, kana clarity, and FSRS states.
+pub mod db;
+
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -18,6 +21,15 @@ pub fn default_settings_path() -> Result<PathBuf> {
 /// Resolves the platform-specific configuration file path for Kotodama deck workspace configs.
 pub fn default_deck_config_path() -> Result<PathBuf> {
     Ok(kotodama_config_dir("deck configuration")?.join("deck_config.json"))
+}
+
+/// Resolves the platform-specific SQLite database path for Kotodama's local FSRS and analytics store.
+#[allow(dead_code)]
+pub fn default_database_path() -> Result<PathBuf> {
+    let data_root = dirs::data_local_dir()
+        .or_else(dirs::config_dir)
+        .context("Could not determine the system data directory for Kotodama database")?;
+    Ok(data_root.join("kotodama").join("kotodama.db"))
 }
 
 /// Loads persisted [`AppSettings`] from `path`, returning defaults when no file exists yet.
