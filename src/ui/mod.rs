@@ -9,8 +9,9 @@ pub mod setup;
 /// Warm, playful Light and Dark palettes and Iced widget style helpers.
 pub mod theme;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Error;
 use chrono::Utc;
@@ -26,14 +27,20 @@ use iced::{
 
 use crate::anki::{reader, validator};
 use crate::audio::capture::{self, MicMonitorHandle, RecordingSession};
-use crate::audio::playback;
+use crate::audio::{dsp, playback};
 use crate::models::{
     AnkiCard, AnkiCollectionSummary, AnkiRawNote, AppErrorToast, AppSettings, CsvExportReport,
-    DailyGoal, DailyStreak, DeckAudioReport, DeckConfig, DeckWorkspaceConfig, InputDeviceInfo,
-    MicLevelSnapshot, NavTab, PlaybackSpeed, PracticeMode, RecordedTake, ResolvedTheme,
-    ScoreThresholds, ThemePreference, VadConfig,
+    DailyGoal, DailyStreak, DecodedAudio, DeckAudioReport, DeckConfig, DeckWorkspaceConfig,
+    FsrsCardState, FsrsRating, FsrsSchedulingOutcome, InputDeviceInfo, MicLevelSnapshot, NavTab,
+    PitchExtractionConfig, PlaybackSpeed, PracticeDeckStatus, PracticeEvaluationResult,
+    PracticeMicViewState, PracticeMode, PracticeShortcutAction, PracticeTargetClip, RecordedTake,
+    ReferenceContourPreview, ResolvedTheme, ScoreThresholds, ThemePreference, VadConfig,
 };
+use crate::scoring::fsrs_bridge::FsrsScheduler;
+use crate::scoring::mora::{HeuristicAcousticMoraScorer, MoraScorer};
+use crate::scoring::pitch;
 use crate::storage::{self, db::KotodamaDb, export};
+use crate::ui::practice::{PracticePhase, PracticeState};
 use crate::ui::setup::{NONE_FIELD_OPTION, SetupSourceMode, SetupState};
 use crate::ui::theme::ThemeTokens;
 
@@ -61,6 +68,8 @@ pub enum Message {
     SelectPlaybackSpeed(PlaybackSpeed),
     /// Updates the daily card goal preset.
     SetDailyGoalCards(u32),
+    /// Updates the daily practice duration goal preset in minutes.
+    SetDailyGoalMinutes(u32),
     /// Updates the score-to-FSRS rating thresholds.
     SetScoreThresholds(ScoreThresholds),
     /// Prompts for a folder and exports review history, kana stats, and pitch logs to CSV.
@@ -155,8 +164,100 @@ pub enum Message {
     RestoreAllExcludedCards(String),
     /// Toggles visibility of the excluded-cards list in Setup.
     ToggleExcludedCardsList,
-    /// Simulates a recoverable feature/setup error surfaced as a dismissible toast.
-    TriggerRecoverableAction,
+    /// Starts a pronunciation practice session (`extra_study` bypasses the due-only filter).
+    PracticeStartSession {
+        /// Whether to include all active cards instead of only due/unseen cards.
+        extra_study: bool,
+    },
+    /// Receives loaded active cards, due queue order, pitch history, media dir, and initial FSRS context.
+    #[allow(clippy::type_complexity)]
+    PracticeDeckPrepared(
+        Result<
+            (
+                Vec<AnkiCard>,
+                Vec<i64>,
+                BTreeMap<i64, f32>,
+                Option<PathBuf>,
+                Option<FsrsCardState>,
+                [u32; 4],
+            ),
+            String,
+        >,
+    ),
+    /// Ends the active practice session and returns to the Practice Lobby.
+    PracticeEndSession,
+    /// Continues practicing beyond the daily cap or due queue.
+    PracticeContinueExtra,
+    /// Switches between word and sentence audio for the active practice card.
+    PracticeSelectTargetClip(PracticeTargetClip),
+    /// Selects a target mora chip in Mora Purity or Combined Shadowing views.
+    PracticeSelectMora(usize),
+    /// Reveals masked Japanese text early while in Blind / Audio-Only Mode.
+    PracticeRevealText,
+    /// Enables or disables automatic countdown recording after Combined Shadowing playback.
+    PracticeToggleShadowAutoRecord(bool),
+    /// Plays the reference clip and triggers the 3-2-1 Combined Shadowing countdown.
+    PracticeStartShadowFlow,
+    /// Decodes (if needed) and plays the active card's reference audio clip.
+    PracticePlayReference,
+    /// Receives decoded reference audio and optional precomputed `F0` contour.
+    PracticeReferenceDecoded {
+        /// Card generation token preventing stale updates across card switches.
+        generation: u64,
+        /// Decoded PCM audio and optional normalized pitch contour.
+        result: Result<(DecodedAudio, Option<ReferenceContourPreview>), String>,
+    },
+    /// Receives completion notification for reference audio playback.
+    PracticeReferencePlaybackFinished {
+        /// Card generation token matching the clip that finished playing.
+        generation: u64,
+        /// Playback completion status.
+        result: Result<(), String>,
+    },
+    /// Starts or stops Practice microphone capture.
+    PracticeToggleRecording,
+    /// Receives background mora and/or pitch scoring results for a completed take.
+    PracticeTakeEvaluated {
+        /// Take generation token preventing stale evaluation updates.
+        take_generation: u64,
+        /// Evaluated mora and/or pitch scoring result.
+        result: Result<PracticeEvaluationResult, String>,
+    },
+    /// Plays back the user's most recent recorded take at the active playback speed.
+    PracticePlayUserTake,
+    /// Receives completion notification for playing the user's recorded take.
+    PracticeUserTakePlaybackFinished(Result<(), String>),
+    /// Submits an FSRS rating (`Again`, `Hard`, `Good`, `Easy`) for the active card.
+    PracticeSubmitRating {
+        /// Selected FSRS rating.
+        rating: FsrsRating,
+        /// Whether this rating came from a manual user choice rather than auto-accept.
+        is_manual: bool,
+    },
+    /// Receives the persisted FSRS scheduling outcome and updated streak after committing a review.
+    PracticeReviewCommitted {
+        /// Card generation token ensuring the commit belongs to the active card.
+        card_generation: u64,
+        /// Final FSRS rating persisted for the review.
+        rating: FsrsRating,
+        /// Whether the applied rating differed from the automated recommendation.
+        was_manual_override: bool,
+        /// Scheduling outcome, updated daily streak, and latest pitch error percentage.
+        result: Result<(FsrsSchedulingOutcome, DailyStreak, Option<f32>), String>,
+    },
+    /// Receives FSRS state and prospective day intervals for the current practice card.
+    PracticeCardContextLoaded {
+        /// Card generation token matching the requested card.
+        card_generation: u64,
+        /// Existing FSRS state and prospective `[Again, Hard, Good, Easy]` intervals in days.
+        result: Result<(Option<FsrsCardState>, [u32; 4]), String>,
+    },
+    /// Skips the current practice card without recording an FSRS review.
+    PracticeSkipCard,
+    /// Dispatches a keyboard shortcut captured while the Practice tab is active.
+    PracticeKeyShortcut(PracticeShortcutAction),
+    /// Increments the active practice session timer once per second.
+    PracticeSessionTick,
     /// Triggers a sample recoverable error toast from Settings for testing UX.
     TriggerSampleError,
     /// Dismisses a single toast notification by ID.
@@ -172,6 +273,9 @@ pub struct KotodamaApp {
     deck_workspace: DeckWorkspaceConfig,
     loaded_cards: Vec<AnkiCard>,
     setup_state: SetupState,
+    practice_state: PracticeState,
+    practice_recording: Option<RecordingSession>,
+    practice_mic_level: MicLevelSnapshot,
     streak: DailyStreak,
     settings: AppSettings,
     input_devices: Vec<InputDeviceInfo>,
@@ -202,6 +306,9 @@ impl Default for KotodamaApp {
             deck_workspace: DeckWorkspaceConfig::default(),
             loaded_cards: Vec::new(),
             setup_state: SetupState::default(),
+            practice_state: PracticeState::default(),
+            practice_recording: None,
+            practice_mic_level: MicLevelSnapshot::default(),
             streak,
             settings,
             input_devices: Vec::new(),
@@ -437,6 +544,12 @@ impl KotodamaApp {
             }
             Message::SetDailyGoalCards(cards) => {
                 let goal = DailyGoal::Cards(cards);
+                self.settings.daily_goal = goal;
+                self.streak.daily_goal = goal;
+                self.persist_settings();
+            }
+            Message::SetDailyGoalMinutes(minutes) => {
+                let goal = DailyGoal::Minutes(minutes);
                 self.settings.daily_goal = goal;
                 self.streak.daily_goal = goal;
                 self.persist_settings();
@@ -1031,18 +1144,28 @@ impl KotodamaApp {
             Message::ToggleExcludedCardsList => {
                 self.setup_state.show_excluded_list = !self.setup_state.show_excluded_list;
             }
-            Message::TriggerRecoverableAction => {
-                let message = if self.deck_workspace.active_deck.is_some() {
-                    "Interactive Practice Canvas views and live drill sessions are scheduled for Phase 5."
-                } else {
-                    "Connect and validate an Anki deck in Setup first; interactive practice views land in Phase 5."
-                };
-                self.report_warning(
-                    "Upcoming Practice View",
-                    message,
-                    Some("Mora scoring, FSRS scheduling, SQLite storage, and Dashboard CSV/JSON exports are ready.".to_string()),
-                );
-            }
+            Message::PracticeStartSession { .. }
+            | Message::PracticeDeckPrepared(_)
+            | Message::PracticeEndSession
+            | Message::PracticeContinueExtra
+            | Message::PracticeSelectTargetClip(_)
+            | Message::PracticeSelectMora(_)
+            | Message::PracticeRevealText
+            | Message::PracticeToggleShadowAutoRecord(_)
+            | Message::PracticeStartShadowFlow
+            | Message::PracticePlayReference
+            | Message::PracticeReferenceDecoded { .. }
+            | Message::PracticeReferencePlaybackFinished { .. }
+            | Message::PracticeToggleRecording
+            | Message::PracticeTakeEvaluated { .. }
+            | Message::PracticePlayUserTake
+            | Message::PracticeUserTakePlaybackFinished(_)
+            | Message::PracticeSubmitRating { .. }
+            | Message::PracticeReviewCommitted { .. }
+            | Message::PracticeCardContextLoaded { .. }
+            | Message::PracticeSkipCard
+            | Message::PracticeKeyShortcut(_)
+            | Message::PracticeSessionTick => {}
             Message::TriggerSampleError => {
                 let err = anyhow::anyhow!(
                     "Could not open collection.anki2: no deck file has been selected yet."
@@ -1079,12 +1202,23 @@ impl KotodamaApp {
                 resolved_theme,
             ),
             NavTab::Practice => practice::view(
+                &self.practice_state,
                 self.active_mode,
                 &self.settings,
                 &self.streak,
-                self.active_practice_cards().len(),
-                self.excluded_count_for_active_deck(),
-                self.deck_workspace.active_deck.is_some(),
+                PracticeDeckStatus {
+                    has_deck: self.deck_workspace.active_deck.is_some(),
+                    active_card_count: self.active_practice_cards().len(),
+                    excluded_card_count: self.excluded_count_for_active_deck(),
+                },
+                PracticeMicViewState {
+                    is_recording: self.practice_recording.is_some(),
+                    mic_level: self.practice_mic_level,
+                    elapsed_ms: self
+                        .practice_recording
+                        .as_ref()
+                        .map_or(0, RecordingSession::elapsed_ms),
+                },
                 resolved_theme,
             ),
             NavTab::Dashboard => dashboard::view(
@@ -1992,13 +2126,13 @@ impl KotodamaApp {
     }
 }
 
-struct MicMeterProgram {
-    meter_ratio: f32,
-    vad_threshold_ratio: f32,
-    is_speech: bool,
-    is_clipping: bool,
-    is_active: bool,
-    resolved_theme: ResolvedTheme,
+pub(crate) struct MicMeterProgram {
+    pub(crate) meter_ratio: f32,
+    pub(crate) vad_threshold_ratio: f32,
+    pub(crate) is_speech: bool,
+    pub(crate) is_clipping: bool,
+    pub(crate) is_active: bool,
+    pub(crate) resolved_theme: ResolvedTheme,
 }
 
 impl canvas::Program<Message> for MicMeterProgram {
