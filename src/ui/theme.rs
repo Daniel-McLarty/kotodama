@@ -2,7 +2,7 @@
 
 use iced::overlay::menu;
 use iced::theme::Palette;
-use iced::widget::{button, container, pick_list, slider, text_input};
+use iced::widget::{button, container, pick_list, progress_bar, slider, text_input};
 use iced::{Border, Color, Shadow, Theme, Vector, color};
 
 use crate::models::{ErrorSeverity, FsrsRating, MoraChipTone, ResolvedTheme};
@@ -602,6 +602,51 @@ pub fn mora_chip_style(
     }
 }
 
+/// Returns an adaptive progress bar style closure using `fill_color` on the active warm track.
+pub fn progress_bar_style(fill_color: Color) -> impl Fn(&Theme) -> progress_bar::Style {
+    move |theme| {
+        let colors = tokens_for_theme(theme);
+        progress_bar::Style {
+            background: colors.card_muted.into(),
+            bar: fill_color.into(),
+            border: Border {
+                color: colors.border,
+                width: 1.0,
+                radius: 999.0.into(),
+            },
+        }
+    }
+}
+
+/// Returns an adaptive button style closure for clickable dashboard analytics rows.
+pub fn selectable_row_button_style(
+    is_selected: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let colors = tokens_for_theme(theme);
+        let background = match (is_selected, status) {
+            (true, _) => colors.coral_soft,
+            (false, button::Status::Hovered | button::Status::Pressed) => colors.card_surface,
+            (false, _) => colors.card_muted,
+        };
+        let border_color = if is_selected {
+            colors.coral
+        } else {
+            colors.border
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color: colors.text_primary,
+            border: Border {
+                color: border_color,
+                width: if is_selected { 1.5 } else { 1.0 },
+                radius: 12.0.into(),
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,6 +737,20 @@ mod tests {
             let mistake_chip = mora_chip_style(MoraChipTone::Mistake, true)(&theme, button::Status::Active);
             assert_eq!(mistake_chip.border.color, colors.danger);
             assert_eq!(mistake_chip.border.width, 2.0);
+
+            let bar = progress_bar_style(colors.sage)(&theme);
+            assert_eq!(bar.background, colors.card_muted.into());
+            assert_eq!(bar.bar, colors.sage.into());
+            assert_eq!(bar.border.color, colors.border);
+
+            let selected_row = selectable_row_button_style(true)(&theme, button::Status::Active);
+            assert_eq!(selected_row.background, Some(colors.coral_soft.into()));
+            assert_eq!(selected_row.border.color, colors.coral);
+            assert_eq!(selected_row.border.width, 1.5);
+
+            let hovered_row = selectable_row_button_style(false)(&theme, button::Status::Hovered);
+            assert_eq!(hovered_row.background, Some(colors.card_surface.into()));
+            assert_eq!(hovered_row.border.color, colors.border);
         }
     }
 }
